@@ -14,7 +14,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Android build tools
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
       - name: Install Android NDK 29 and zstd
         shell: bash
         run: |
