@@ -1,0 +1,107 @@
+name: ZERO Native Mario private ARM64 compile
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  ndk-native-code:
+    name: Compile generated native code (not APK)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - name: Checkout private CI configuration
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install Android build tools
+        uses: android-actions/setup-android@v3
+      - name: Install Android NDK 29 and zstd
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y zstd
+          sdkmanager --install 'ndk;29.0.14206865'
+          ndk="$ANDROID_HOME/ndk/29.0.14206865"
+          test -x "$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++"
+          echo "NDK_HOME=$ndk" >> "$GITHUB_ENV"
+      - name: Download owner-generated native C++ from PRIVATE release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p native-input
+          gh release download zero-rev2-source-v1 -R "$GITHUB_REPOSITORY" \
+             -p 'zero-rev2-code-only.tar.zst' -p 'RuntimeConfig.h' \
+             -p 'code_inventory.json' -D "$RUNNER_TEMP"
+          # Refuse non-code payloads and traversal paths before extracting.
+          tar -I zstd -tf "$RUNNER_TEMP/zero-rev2-code-only.tar.zst" > "$RUNNER_TEMP/archive-files.txt"
+          python3 - "$RUNNER_TEMP/archive-files.txt" <<'PY'
+          import pathlib,sys
+          files=pathlib.Path(sys.argv[1]).read_text().splitlines()
+          assert files, 'empty payload'
+          allowed={'base_common','base_registration','base_dispatch'}
+          for file in files:
+              path=pathlib.PurePosixPath(file)
+              assert len(path.parts)==2 and path.parts[0] in allowed and path.suffix in {'.cpp','.h'}, f'unsafe payload path: {file}'
+          assert sum(s.startswith('base_common/shard_') and s.endswith('.cpp') for s in files)>=60, 'missing native function shards'
+          print('Accepted code-only archive:',len(files),'files')
+          PY
+          mkdir -p native-input/generated/build_shards
+          tar -I zstd -xf "$RUNNER_TEMP/zero-rev2-code-only.tar.zst" -C native-input/generated/build_shards --no-same-owner
+          cp "$RUNNER_TEMP/RuntimeConfig.h" native-input/generated/RuntimeConfig.h
+          cp "$RUNNER_TEMP/code_inventory.json" native-input/code_inventory.json
+      - name: Checkout pinned public WiiCompiled headers only
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init -q upstream
+          git -C upstream remote add origin https://github.com/WitherBlitz/NSMB-Wii-Multiplayer-Recompilation.git
+          git -C upstream sparse-checkout init --cone
+          git -C upstream sparse-checkout set runtime/include runtime/src aurora-main/include
+          git -C upstream fetch --depth 1 origin 69ee62be4a28b14ae69c2a03443e3e376f5c3344
+          git -C upstream checkout --detach FETCH_HEAD
+          test -f upstream/runtime/include/abi_bridge.h
+          test -f upstream/aurora-main/include/dolphin/gx.h
+      - name: Compile generated guest and registration code with Android NDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          export HOME_WORK="$GITHUB_WORKSPACE"
+          source_root="$GITHUB_WORKSPACE/native-input/generated/build_shards"
+          mkdir -p "$GITHUB_WORKSPACE/out/objects"
+          compiler="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++"
+          "$compiler" --version | head -1
+          mapfile -d '' sources < <(find "$source_root/base_common" "$source_root/base_registration" "$source_root/base_dispatch" -type f -name '*.cpp' -print0 | sort -z)
+          test "${#sources[@]}" -ge 75
+          i=0
+          for file in "${sources[@]}"; do
+            name="$(basename "$file" .cpp)"
+            obj="$GITHUB_WORKSPACE/out/objects/${i}_${name}.o"
+            echo "[ZERO] Android NDK compile $((i+1))/${#sources[@]}: $name"
+            "$compiler" --target=aarch64-linux-android30 -std=c++17 -O0 \
+              -fPIC -DTARGET_PC -fno-fast-math -ffp-contract=off -fno-slp-vectorize \
+              -DNOMINMAX -w -pipe \
+              -I "$GITHUB_WORKSPACE/upstream/runtime/include" \
+              -I "$GITHUB_WORKSPACE/upstream/runtime/src" \
+              -I "$GITHUB_WORKSPACE/upstream" \
+              -I "$GITHUB_WORKSPACE/upstream/aurora-main/include" \
+              -I "$GITHUB_WORKSPACE/native-input" \
+              -c "$file" -o "$obj"
+            i=$((i+1))
+          done
+          printf 'NDK arm64-v8a compilation passed: %s C++ files\n' "$i" > out/report.txt
+          readelf -h "$(find out/objects -name '*.o' -print -quit)" | grep -E 'Class:|Machine:|Type:' | tee -a out/report.txt
+          "$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar" rcs out/libzero_rev2_code_NDK_UNLINKED.a out/objects/*.o
+          ls -lh out/libzero_rev2_code_NDK_UNLINKED.a | tee -a out/report.txt
+          echo 'Unlinked code archive only; no Aurora runtime, game assets, or APK.' | tee -a out/report.txt
+      - name: Upload PRIVATE Android NDK compilation evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: zero-rev2-android-ndk-objects
+          path: |
+            out/libzero_rev2_code_NDK_UNLINKED.a
+            out/report.txt
+          retention-days: 3
+          if-no-files-found: error

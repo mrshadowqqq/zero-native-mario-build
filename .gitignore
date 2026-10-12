@@ -1,0 +1,17 @@
+# Do not commit game-derived code; source is accepted only as a private release asset.
+*.wbfs
+*.iso
+*.rvz
+*.dol
+*.rel
+*.LZ
+*.bin
+*.sav
+*.gci
+*.cpp
+*.h
+*.tar.zst
+*.o
+*.a
+*.so
+.DS_Store
