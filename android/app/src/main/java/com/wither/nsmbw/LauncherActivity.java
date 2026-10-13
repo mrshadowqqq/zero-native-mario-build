@@ -2,7 +2,6 @@ package com.wither.nsmbw;
 
 import android.app.Activity;
 import android.app.AlertDialog;
-import android.content.ActivityNotFoundException;
 import android.content.ContentResolver;
 import android.content.Intent;
 import android.content.pm.PackageInfo;
@@ -15,7 +14,6 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.provider.DocumentsContract;
-import android.provider.OpenableColumns;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
@@ -25,18 +23,13 @@ import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
-import java.io.BufferedInputStream;
 import java.io.File;
 import java.io.FileOutputStream;
-import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Locale;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipInputStream;
 
 /**
  * Start screen: play, or import the player's own game the way Dolphin extracts it (the folder, or
@@ -44,26 +37,15 @@ import java.util.zip.ZipInputStream;
  */
 public final class LauncherActivity extends Activity {
     private static final int REQUEST_IMPORT = 1;
-    private static final int REQUEST_ZIP = 2;
     /** Set by GameActivity.restartForSession: open the game again once its old process is gone. */
     static final String EXTRA_RESTART_GAME = "restartGame";
     /** Set by the game's "Start Menu": show this screen even with Skip Start Menu on. */
     static final String EXTRA_SHOW_START_MENU = "showStartMenu";
 
-    static final String PROJECT_URL = "https://github.com/WitherBlitz/NSMB-Wii-Multiplayer-Recompilation";
-
-    private static final String DOLPHIN_STEPS =
-            "Use your own USA New Super Mario Bros. Wii (SMNE01, revision 2). Easiest: in Dolphin on a "
-            + "computer, right-click the game, choose Properties, Filesystem, then right-click the disc and "
-            + "choose Extract Entire Disc. Copy that folder (or a zip of it) to this phone and tap Import. "
-            + "Dolphin shows the revision under Properties > Info.";
-
     private AppSettings settings;
-    private Button skip;
 
     private TextView status;
     private Button play;
-    private View steps;
     private final Handler main = new Handler(Looper.getMainLooper());
 
     @Override
@@ -82,105 +64,56 @@ public final class LauncherActivity extends Activity {
             finish();
             return;
         }
-        final int pad = dp(24);
+        // ZERO_SIMPLE_V29A: three primary actions; no ZIP import during startup.
+        final int pad = dp(28);
         final LinearLayout column = new LinearLayout(this);
         column.setOrientation(LinearLayout.VERTICAL);
-        column.setPadding(pad, dp(12), pad, pad);
+        column.setPadding(pad, dp(56), pad, dp(32));
         column.setGravity(Gravity.CENTER_HORIZONTAL);
+        column.setBackgroundColor(Color.BLACK);
 
-        final LinearLayout header = new LinearLayout(this);
-        header.setOrientation(LinearLayout.HORIZONTAL);
-        header.setGravity(Gravity.CENTER_VERTICAL);
-        final TextView title = text("NSMBW", 34);
+        final TextView title = text("ZERO", 42);
         title.setTypeface(Typeface.DEFAULT_BOLD);
-        title.setGravity(Gravity.START);
-        header.addView(title, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
-        header.addView(link("Help", v -> showHelp()));
-        column.addView(header, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT));
-        final TextView subtitle = text("New Super Mario Bros. Wii, recompiled to run natively", 15);
-        subtitle.setGravity(Gravity.START);
-        column.addView(subtitle, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT));
+        title.setGravity(Gravity.CENTER_HORIZONTAL);
+        column.addView(title);
 
-        status = text("", 16);
-        status.setPadding(0, dp(20), 0, dp(12));
+        final TextView subtitle = text("NATIVE MARIO  /  REVISION 2", 13);
+        subtitle.setTextColor(Color.rgb(165, 165, 165));
+        subtitle.setPadding(0, dp(8), 0, dp(24));
+        column.addView(subtitle);
+
+        status = text("Checking game data...", 15);
+        status.setTextColor(Color.rgb(190, 190, 190));
+        status.setPadding(0, dp(15), 0, dp(28));
         column.addView(status);
 
-        play = button("Play");
+        play = button("PLAY");
+        play.setAllCaps(false);
+        play.setTypeface(Typeface.DEFAULT_BOLD);
+        play.setTextColor(Color.BLACK);
+        play.setBackgroundTintList(android.content.res.ColorStateList.valueOf(Color.WHITE));
         play.setOnClickListener(v -> {
-            ZeroDiagnostics.event(this, "PLAY_REQUEST", "starting game activity");
+            ZeroDiagnostics.event(this, "PLAY_REQUEST", "starting native game activity");
             startActivity(new Intent(this, GameActivity.class));
         });
         column.addView(play);
 
-        skip = button("");
-        skip.setOnClickListener(v -> {
-            settings.setSkipStartMenu(!settings.skipStartMenu());
-            updateSkipButton();
-        });
-        column.addView(skip);
-        final TextView skipHelp = text("On: opening the app goes straight into the game. "
-                + "In the game, the phone's Back gesture and Start Menu bring you back here.", 13);
-        skipHelp.setTextColor(Color.rgb(170, 178, 186));
-        skipHelp.setPadding(0, dp(4), 0, 0);
-        column.addView(skipHelp);
-        updateSkipButton();
-
-        final Button settingsButton = button("Settings");
-        settingsButton.setOnClickListener(v -> SettingsMenu.show(this));
+        final Button settingsButton = button("SETTINGS");
+        settingsButton.setTextColor(Color.WHITE);
+        settingsButton.setBackgroundTintList(android.content.res.ColorStateList.valueOf(Color.rgb(48,48,48)));
+        settingsButton.setOnClickListener(v -> showZeroSettings());
         column.addView(settingsButton);
 
-        // ZERO_DIAG_V28: diagnostics are accessible even after a native :game process crash.
-        final Button diagnosticsButton = button("Debug & Startup Logs");
-        diagnosticsButton.setOnClickListener(v -> startActivity(new Intent(this, ZeroDiagnosticsActivity.class)));
-        column.addView(diagnosticsButton);
+        final Button debugButton = button("DEBUG & LOGS");
+        debugButton.setTextColor(Color.WHITE);
+        debugButton.setBackgroundTintList(android.content.res.ColorStateList.valueOf(Color.rgb(48,48,48)));
+        debugButton.setOnClickListener(v -> startActivity(new Intent(this, ZeroDiagnosticsActivity.class)));
+        column.addView(debugButton);
 
-        final Button devices = button("Tailscale & LAN Devices");
-        devices.setOnClickListener(v -> DevicesDialog.show(this));
-        column.addView(devices);
-
-        // How to get the game files, the same steps KartPad gives, until a game is imported.
-        final LinearLayout stepsBox = new LinearLayout(this);
-        stepsBox.setOrientation(LinearLayout.VERTICAL);
-        stepsBox.setPadding(0, dp(24), 0, 0);
-        final TextView stepsTitle = text("Get the game files (once)", 20);
-        stepsTitle.setTypeface(Typeface.DEFAULT_BOLD);
-        stepsTitle.setGravity(Gravity.START);
-        stepsBox.addView(stepsTitle);
-        final TextView stepsText = text(
-                "1. In Dolphin on a computer, right-click New Super Mario Bros. Wii and choose Properties.\n"
-                + "2. Open Filesystem, right-click the disc at the top and choose Extract Entire Disc.\n"
-                + "3. Copy that folder (or a zip of it) to this phone.\n"
-                + "4. Tap Import from Extracted Game Data Folder… or Import Game Data Zip… below and choose it.\n\n"
-                + "Use the USA disc, revision 2 (SMNE01): Dolphin shows the revision under Properties > Info.", 15);
-        stepsText.setGravity(Gravity.START);
-        stepsText.setPadding(0, dp(6), 0, 0);
-        stepsText.setLineSpacing(dp(3), 1f);
-        stepsBox.addView(stepsText);
-        steps = stepsBox;
-        column.addView(stepsBox, new LinearLayout.LayoutParams(Math.min(dp(560),
-                getResources().getDisplayMetrics().widthPixels - 2 * pad), LinearLayout.LayoutParams.WRAP_CONTENT));
-
-        final TextView importHelp = text("Import your own New Super Mario Bros. Wii (USA, SMNE01) once. "
-                + "Easiest: the folder Dolphin's Extract Entire Disc makes (DATA, or the folder that holds it), "
-                + "or a zip of that folder. Your saves are kept.", 13);
-        importHelp.setTextColor(Color.rgb(170, 178, 186));
-        importHelp.setPadding(0, dp(24), 0, 0);
-        column.addView(importHelp);
-
-        final Button importFolder = button("Import from Extracted Game Data Folder…");
-        importFolder.setOnClickListener(v -> startActivityForResult(
-                new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE), REQUEST_IMPORT));
-        column.addView(importFolder);
-        final Button importZip = button("Import Game Data Zip…");
-        importZip.setOnClickListener(v -> pickZip());
-        column.addView(importZip);
-
-        final TextView version = text("NSMBW " + versionText(), 13);
-        version.setTextColor(Color.rgb(120, 128, 136));
-        version.setPadding(0, dp(24), 0, 0);
-        column.addView(version);
+        final TextView note = text("Native ARM64  ·  Developer Build", 12);
+        note.setTextColor(Color.rgb(126,126,126));
+        note.setPadding(0, dp(30), 0, 0);
+        column.addView(note);
 
         final ScrollView scroll = new ScrollView(this);
         scroll.addView(column);
@@ -210,64 +143,57 @@ public final class LauncherActivity extends Activity {
         refresh();
     }
 
-    private void updateSkipButton() {
-        skip.setText("Skip Start Menu: " + (settings.skipStartMenu() ? "On" : "Off"));
-    }
-
     private void refresh() {
         final boolean present = AppFiles.hasGameData(this);
         final String problem = present ? AppFiles.gameProblem(AppFiles.gameDir(this)) : null;
         if (!present) {
-            status.setText("No game data yet. Import the folder Dolphin made, or a zip of it.");
+            status.setText("Game data not installed. Open Settings > Game Data.");
         } else if (problem != null) {
-            status.setText("The imported game can't be played. " + problem);
+            status.setText("Game data needs attention. " + problem);
         } else {
-            status.setText("Game data is installed and checked.");
+            status.setText("Game files verified. Ready to attempt native launch.");
         }
         play.setEnabled(present && problem == null);
-        steps.setVisibility(present && problem == null ? View.GONE : View.VISIBLE);
     }
 
-    /** Getting Started, laid out like KartPad's. */
-    private void showHelp() {
-        final LinearLayout column = new LinearLayout(this);
-        column.setOrientation(LinearLayout.VERTICAL);
-        column.setPadding(dp(24), dp(16), dp(24), dp(16));
-        section(column, "1. Import New Super Mario Bros. Wii", DOLPHIN_STEPS);
-        section(column, "2. Play", "Tap Play. For LAN play, move up to the Couch button at the top right of the save file screen and switch it to LAN; "
-                + "every player imports their own game.");
-        section(column, "Stuck on a step?", "The GitHub page covers the supported game, the steps above "
-                + "and common problems.");
-        column.addView(link("Setup Guide on GitHub", v -> openWeb(PROJECT_URL + "#getting-the-game-files")));
-        final TextView version = text("NSMBW " + versionText(), 13);
-        version.setGravity(Gravity.START);
-        version.setTextColor(Color.rgb(170, 178, 186));
-        version.setPadding(0, dp(16), 0, 0);
-        column.addView(version);
-        final ScrollView scroll = new ScrollView(this);
-        scroll.addView(column);
-        new AlertDialog.Builder(this).setTitle("Getting Started").setView(scroll)
-                .setPositiveButton("Done", null).show();
+    private void showZeroSettings() {
+        final String[] options = {
+            "Graphics & Controls", "Game Data", "Multiplayer (Advanced)",
+            "Open directly into game: " + (settings.skipStartMenu() ? "On" : "Off"),
+            "About"
+        };
+        new AlertDialog.Builder(this).setTitle("ZERO  /  Settings")
+            .setItems(options, (dialog, selection) -> {
+                switch (selection) {
+                    case 0: SettingsMenu.show(this); break;
+                    case 1: showZeroGameData(); break;
+                    case 2: DevicesDialog.show(this); break;
+                    case 3:
+                        settings.setSkipStartMenu(!settings.skipStartMenu());
+                        showZeroSettings();
+                        break;
+                    case 4:
+                        new AlertDialog.Builder(this).setTitle("ZERO Native Mario")
+                            .setMessage("SMNE01 Revision 2\nAndroid ARM64\n" + versionText()
+                                + "\n\nA private native recompilation development build."
+                                + "\nDiagnose startup from Debug & Logs.")
+                            .setPositiveButton("OK", null).show();
+                        break;
+                    default: break;
+                }
+            })
+            .setNegativeButton("Close", null).show();
     }
 
-    private void section(LinearLayout column, String title, String body) {
-        final TextView heading = text(title, 20);
-        heading.setGravity(Gravity.START);
-        heading.setTypeface(Typeface.DEFAULT_BOLD);
-        column.addView(heading);
-        final TextView text = text(body, 15);
-        text.setGravity(Gravity.START);
-        text.setTextColor(Color.rgb(200, 206, 212));
-        text.setPadding(0, dp(6), 0, dp(18));
-        column.addView(text);
-    }
-
-    private void openWeb(String url) {
-        try {
-            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
-        } catch (ActivityNotFoundException e) {
-            new AlertDialog.Builder(this).setMessage(url).setPositiveButton("OK", null).show();
-        }
+    private void showZeroGameData() {
+        final String state = AppFiles.gameReady(this)
+            ? "Extracted Revision 2 files are installed. The game reads these files directly, not a ZIP."
+            : "To set up game data, select the extracted folder containing files/ and sys/.";
+        new AlertDialog.Builder(this).setTitle("Game Data")
+            .setMessage(state + "\n\nImporting a replacement is optional. Existing saves are stored separately.")
+            .setPositiveButton("Import extracted folder", (dialog, which) ->
+                startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE), REQUEST_IMPORT))
+            .setNegativeButton("Cancel", null).show();
     }
 
     private String versionText() {
@@ -279,15 +205,6 @@ public final class LauncherActivity extends Activity {
         }
     }
 
-    private void pickZip() {
-        final Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-        intent.addCategory(Intent.CATEGORY_OPENABLE);
-        intent.setType("*/*");
-        intent.putExtra(Intent.EXTRA_MIME_TYPES,
-                new String[] {"application/zip", "application/x-zip-compressed", "application/x-zip"});
-        startActivityForResult(intent, REQUEST_ZIP);
-    }
-
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
@@ -297,8 +214,6 @@ public final class LauncherActivity extends Activity {
         final Uri uri = data.getData();
         if (requestCode == REQUEST_IMPORT) {
             runImport(progress -> copyGame(uri, progress));
-        } else if (requestCode == REQUEST_ZIP) {
-            runImport(progress -> copyZip(uri, progress));
         }
     }
 
@@ -427,98 +342,6 @@ public final class LauncherActivity extends Activity {
             }
         }
         return AppFiles.headerProblem(header);
-    }
-
-    /** A zip of the folder Dolphin extracted: unpacked into the staging folder, checked, swapped in. */
-    private String copyZip(Uri zip, Progress progress) throws IOException {
-        final long size = documentSize(zip);
-        final File staging = stagingDir();
-        AppFiles.deleteRecursively(staging);
-        if (!staging.mkdirs()) throw new IOException("cannot create " + staging);
-        final String stagingPath = staging.getCanonicalPath() + File.separator;
-        int count = 0;
-        try (InputStream raw = getContentResolver().openInputStream(zip)) {
-            if (raw == null) throw new IOException("cannot read the zip");
-            final CountingInputStream counted = new CountingInputStream(new BufferedInputStream(raw, 1 << 16));
-            try (ZipInputStream in = new ZipInputStream(counted)) {
-                ZipEntry entry;
-                while ((entry = in.getNextEntry()) != null) {
-                    // Windows PowerShell's zips separate (and end folder entries) with backslashes.
-                    final String name = entry.getName().replace('\\', '/');
-                    final File target = new File(staging, name);
-                    if (!target.getCanonicalPath().startsWith(stagingPath)) {
-                        throw new IOException("the zip holds a path outside its folder: " + name);
-                    }
-                    if (entry.isDirectory() || name.endsWith("/")) {
-                        if (!target.isDirectory() && !target.mkdirs()) throw new IOException("cannot create " + target);
-                        continue;
-                    }
-                    final File parent = target.getParentFile();
-                    if (parent != null && !parent.isDirectory() && !parent.mkdirs()) throw new IOException("cannot create " + parent);
-                    try (OutputStream out = new FileOutputStream(target)) {
-                        AppFiles.copy(in, out);
-                    }
-                    ++count;
-                    if (size > 0) {
-                        final int permille = (int) Math.min(1000, counted.count * 1000 / size);
-                        progress.update(permille, 1000, String.format(Locale.ROOT, "%d of %d MB",
-                                counted.count >> 20, size >> 20));
-                    } else {
-                        progress.update(0, 0, count + " files");
-                    }
-                }
-            }
-        }
-        final File root = findGameRoot(staging, 3);
-        if (root == null) {
-            AppFiles.deleteRecursively(staging);
-            return "That zip doesn't hold an extracted game: zip the folder Dolphin's Extract Entire Disc made "
-                    + "(the one with files and sys in it).\n\nNothing was changed.";
-        }
-        return install(root, count);
-    }
-
-    /** The extracted game inside an unpacked zip: its top, DATA, or a folder holding either. */
-    private static File findGameRoot(File dir, int depth) {
-        if (AppFiles.isGameRoot(dir)) return dir;
-        if (depth == 0) return null;
-        final File[] children = dir.listFiles(File::isDirectory);
-        if (children == null) return null;
-        for (File child : children) {
-            if (child.getName().equals("__MACOSX")) continue;
-            final File found = findGameRoot(child, depth - 1);
-            if (found != null) return found;
-        }
-        return null;
-    }
-
-    private long documentSize(Uri uri) {
-        try (Cursor c = getContentResolver().query(uri, new String[] {OpenableColumns.SIZE}, null, null, null)) {
-            if (c != null && c.moveToFirst() && !c.isNull(0)) return c.getLong(0);
-        } catch (RuntimeException ignored) {
-            // no size: progress counts files instead
-        }
-        return -1;
-    }
-
-    private static final class CountingInputStream extends FilterInputStream {
-        long count;
-        CountingInputStream(InputStream in) { super(in); }
-        @Override public int read() throws IOException {
-            final int b = super.read();
-            if (b >= 0) ++count;
-            return b;
-        }
-        @Override public int read(byte[] buffer, int offset, int length) throws IOException {
-            final int read = super.read(buffer, offset, length);
-            if (read > 0) count += read;
-            return read;
-        }
-        @Override public long skip(long n) throws IOException {
-            final long skipped = super.skip(n);
-            count += skipped;
-            return skipped;
-        }
     }
 
     private boolean looksLikeGame(ContentResolver resolver, Uri tree, String id) {
