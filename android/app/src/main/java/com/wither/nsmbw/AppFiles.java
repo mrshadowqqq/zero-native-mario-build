@@ -72,18 +72,18 @@ final class AppFiles {
 
     /**
      * The first 8 bytes of sys/boot.bin name the game (6 characters) and its revision (byte 7).
-     * This port runs only the USA disc, revision 1: other revisions put the game's code elsewhere.
+     * This port runs only the USA disc, revision 2: other revisions put the game's code elsewhere.
      */
     static String headerProblem(byte[] header) {
         final String id = new String(header, 0, 6, StandardCharsets.US_ASCII);
         final int revision = header[7] & 0xFF;
         if (!id.equals("SMNE01")) {
             return "That is " + id.trim() + ", not New Super Mario Bros. Wii for the USA (SMNE01). "
-                    + "This port runs only the USA disc, revision 1.";
+                    + "This port runs only the USA disc, revision 2.";
         }
-        if (revision != 1) {
+        if (revision != 2) {
             return "That is New Super Mario Bros. Wii revision " + revision + ". This port runs only "
-                    + "revision 1 (Dolphin shows it under Properties > Info).";
+                    + "revision 2 (Dolphin shows it under Properties > Info).";
         }
         return null;
     }

@@ -53,7 +53,7 @@ public final class LauncherActivity extends Activity {
     static final String PROJECT_URL = "https://github.com/WitherBlitz/NSMB-Wii-Multiplayer-Recompilation";
 
     private static final String DOLPHIN_STEPS =
-            "Use your own USA New Super Mario Bros. Wii (SMNE01, revision 1). Easiest: in Dolphin on a "
+            "Use your own USA New Super Mario Bros. Wii (SMNE01, revision 2). Easiest: in Dolphin on a "
             + "computer, right-click the game, choose Properties, Filesystem, then right-click the disc and "
             + "choose Extract Entire Disc. Copy that folder (or a zip of it) to this phone and tap Import. "
             + "Dolphin shows the revision under Properties > Info.";
@@ -144,7 +144,7 @@ public final class LauncherActivity extends Activity {
                 + "2. Open Filesystem, right-click the disc at the top and choose Extract Entire Disc.\n"
                 + "3. Copy that folder (or a zip of it) to this phone.\n"
                 + "4. Tap Import from Extracted Game Data Folder… or Import Game Data Zip… below and choose it.\n\n"
-                + "Use the USA disc, revision 1 (SMNE01): Dolphin shows the revision under Properties > Info.", 15);
+                + "Use the USA disc, revision 2 (SMNE01): Dolphin shows the revision under Properties > Info.", 15);
         stepsText.setGravity(Gravity.START);
         stepsText.setPadding(0, dp(6), 0, 0);
         stepsText.setLineSpacing(dp(3), 1f);
