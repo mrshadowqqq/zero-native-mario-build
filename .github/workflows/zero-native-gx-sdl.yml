@@ -1,0 +1,186 @@
+name: ZERO Native Mario rev2 GX SDL3 dependency fix (NOT APK)
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: 'PRIVATE successful v1.9 provider-link run containing its unresolved ELF and reports'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  gx-provider-fix:
+    name: Compile all 11 required GX sources and compare AArch64 link
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout PRIVATE workflow configuration
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Enforce private repository
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          test "$(gh api "repos/$GITHUB_REPOSITORY" --jq '.private')" = true || {
+            echo 'STOP: repository is not private; no sources will be retrieved.' >&2
+            exit 2
+          }
+      - name: Install official Android NDK 29
+        uses: android-actions/setup-android@v4
+      - name: Resolve NDK compilers
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager --install 'ndk;29.0.14206865'
+          ndk="$ANDROID_HOME/ndk/29.0.14206865"
+          bin="$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          test -x "$bin/clang++"
+          test -x "$bin/ld.lld"
+          echo "NDK_BIN=$bin" >> "$GITHUB_ENV"
+      - name: Download PRIVATE v1.9 artifact only (reuse all previously compiled objects)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_RUN_ID" =~ ^[0-9]+$ ]] || { echo 'Invalid run ID' >&2; exit 2; }
+          mkdir -p "$RUNNER_TEMP/v19"
+          gh run download "$SOURCE_RUN_ID" -R "$GITHUB_REPOSITORY" \
+            -n zero-rev2-ndk-provider-link-v19 -D "$RUNNER_TEMP/v19"
+          test -s "$RUNNER_TEMP/v19/zero_rev2_v19_PARTIAL_UNRESOLVED.o"
+          test -s "$RUNNER_TEMP/v19/unresolved_after.txt"
+          echo "BASE_PARTIAL=$RUNNER_TEMP/v19/zero_rev2_v19_PARTIAL_UNRESOLVED.o" >> "$GITHUB_ENV"
+          echo "BASE_UNRESOLVED=$RUNNER_TEMP/v19/unresolved_after.txt" >> "$GITHUB_ENV"
+      - name: Checkout immutable public WiiCompiled graphics sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init -q upstream
+          git -C upstream remote add origin https://github.com/WitherBlitz/NSMB-Wii-Multiplayer-Recompilation.git
+          git -C upstream sparse-checkout init --cone
+          git -C upstream sparse-checkout set runtime/include runtime/src runtime/third_party/toml11 aurora-main/include
+          git -C upstream fetch --depth 1 origin 69ee62be4a28b14ae69c2a03443e3e376f5c3344
+          git -C upstream checkout --detach FETCH_HEAD
+          test "$(git -C upstream rev-parse HEAD)" = 69ee62be4a28b14ae69c2a03443e3e376f5c3344
+          test -s upstream/runtime/src/hle/gx/gx_internal.h
+      - name: Fetch exact SDL3 3.4.4 HEADERS (no pretense of linking SDL yet)
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init -q sdl
+          git -C sdl remote add origin https://github.com/libsdl-org/SDL.git
+          git -C sdl sparse-checkout init --cone
+          git -C sdl sparse-checkout set include
+          git -C sdl fetch --depth 1 origin 5848e584a1b606de26e3dbd1c7e4ecbc34f807a6
+          git -C sdl checkout --detach FETCH_HEAD
+          test "$(git -C sdl rev-parse HEAD)" = 5848e584a1b606de26e3dbd1c7e4ecbc34f807a6
+          test -s sdl/include/SDL3/SDL_events.h
+          test -s sdl/include/SDL3/SDL_joystick.h
+      - name: Reuse generated compile-time config header from PRIVATE source release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p native-input/generated
+          gh release download zero-rev2-source-v1 -R "$GITHUB_REPOSITORY" \
+            -p RuntimeConfig.h -D "$RUNNER_TEMP"
+          test -s "$RUNNER_TEMP/RuntimeConfig.h"
+          cp "$RUNNER_TEMP/RuntimeConfig.h" native-input/generated/RuntimeConfig.h
+      - name: Build all 11 GX objects with SDL3 headers; required builds MUST pass
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out/objects out/logs
+          sources=(
+            hle/gx/gx_stubs.cpp
+            hle/gx/gx_vertex.cpp
+            hle/gx/gx_tev.cpp
+            hle/gx/gx_texture.cpp
+            hle/gx/gx_transform.cpp
+            hle/gx/gx_pixel.cpp
+            hle/gx/gx_objects.cpp
+            hle/gx/gx_lighting.cpp
+            hle/gx/gx_frame.cpp
+            hle/gx/gx_fifo.cpp
+            hle/gx/gx_utils.cpp
+          )
+          : > out/compile_status.tsv
+          : > out/summary.txt
+          good=()
+          failures=0
+          for source in "${sources[@]}"; do
+            key="${source//\//_}"
+            key="${key//./_}"
+            obj="out/objects/${key}.o"
+            log="out/logs/${key}.log"
+            echo "[ZERO] GX compile: $source"
+            if "$NDK_BIN/clang++" --target=aarch64-linux-android30 \
+                -std=c++20 -O0 -fPIC -DTARGET_PC -DNOMINMAX \
+                -fno-fast-math -ffp-contract=off -fno-slp-vectorize \
+                -I "$GITHUB_WORKSPACE/upstream/runtime/include" \
+                -I "$GITHUB_WORKSPACE/upstream/runtime/src" \
+                -I "$GITHUB_WORKSPACE/upstream/runtime/third_party/toml11" \
+                -I "$GITHUB_WORKSPACE/upstream" \
+                -I "$GITHUB_WORKSPACE/upstream/aurora-main/include" \
+                -I "$GITHUB_WORKSPACE/sdl/include" \
+                -I "$GITHUB_WORKSPACE/native-input" \
+                -c "upstream/runtime/src/$source" -o "$obj" > "$log" 2>&1; then
+              echo -e "OK\t$source" | tee -a out/compile_status.tsv
+              good+=("$obj")
+            else
+              echo -e "FAIL\t$source" | tee -a out/compile_status.tsv
+              ((failures+=1))
+              grep -m 1 -E 'fatal error:|error:' "$log" || tail -n 12 "$log" || true
+            fi
+          done
+          echo "GX objects compiled: ${#good[@]}/11" | tee -a out/summary.txt
+          echo "GX compile failures: $failures" | tee -a out/summary.txt
+          if ((failures)); then
+            echo 'STOP: required GX files failed. See the uploaded logs; not claiming link success.' | tee -a out/summary.txt
+            exit 1
+          fi
+          "$NDK_BIN/llvm-ar" rcs out/libzero_rev2_gx_headers_only_UNLINKED.a "${good[@]}"
+          "$NDK_BIN/ld.lld" -r -o out/zero_rev2_v20_PARTIAL_UNRESOLVED.o \
+            "$BASE_PARTIAL" "${good[@]}"
+          "$NDK_BIN/llvm-nm" -u -P out/zero_rev2_v20_PARTIAL_UNRESOLVED.o \
+            | awk '{print $1}' | LC_ALL=C sort -u > out/unresolved_after.txt
+          LC_ALL=C sort -u "$BASE_UNRESOLVED" > out/unresolved_before.txt
+          comm -23 out/unresolved_before.txt out/unresolved_after.txt > out/resolved_from_v19.txt
+          comm -13 out/unresolved_before.txt out/unresolved_after.txt > out/new_dependencies.txt
+          {
+            echo "v19 unresolved names: $(wc -l < out/unresolved_before.txt)"
+            echo "v20 unresolved names: $(wc -l < out/unresolved_after.txt)"
+            echo "v19 names resolved: $(wc -l < out/resolved_from_v19.txt)"
+            echo "New dependencies: $(wc -l < out/new_dependencies.txt)"
+            echo 'PARTIAL relocatable AArch64 object only; NO SDL3 library, Dawn, Vulkan, libmain.so, APK, or gameplay verification.'
+          } | tee -a out/summary.txt
+          readelf -h out/zero_rev2_v20_PARTIAL_UNRESOLVED.o \
+            | grep -E 'Class:|Type:|Machine:' | tee -a out/summary.txt
+          readelf -h out/zero_rev2_v20_PARTIAL_UNRESOLVED.o | grep -q 'Machine:.*AArch64'
+          readelf -h out/zero_rev2_v20_PARTIAL_UNRESOLVED.o | grep -q 'Type:.*REL'
+      - name: Upload PRIVATE GX build logs and linker evidence (including failures)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zero-rev2-ndk-gx-sdl-v20
+          path: |
+            out/summary.txt
+            out/compile_status.tsv
+            out/logs/*.log
+            out/unresolved_before.txt
+            out/unresolved_after.txt
+            out/resolved_from_v19.txt
+            out/new_dependencies.txt
+            out/libzero_rev2_gx_headers_only_UNLINKED.a
+            out/zero_rev2_v20_PARTIAL_UNRESOLVED.o
+          retention-days: 3
+          if-no-files-found: warn
