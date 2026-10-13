@@ -37,6 +37,7 @@ import java.util.Arrays;
 final class ZeroPatchCenter {
     static final int REQUEST_AUTH = 2891;
     static final int REQUEST_EXPORT_CPP = 2892;
+    static final int REQUEST_IMPORT_MODULE = 2913;
     private static final String PREFS = "zero_patch_center_v1";
     private static final String TEMPLATE = "ZERO_PATCH_V1\nstartup_cover_frames=8\nslow_log_every=8\n";
     private static final String CPP_TEMPLATE =
@@ -49,7 +50,7 @@ final class ZeroPatchCenter {
     private static boolean authenticated = false;
 
     static boolean allowed(Context context) {
-        return context.getPackageName().equals("com.wither.nsmbw.zeropatchdev");
+        return context.getPackageName().equals("com.wither.nsmbw.zeromoddev");
     }
     private static SharedPreferences prefs(Context c) {
         return c.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
@@ -103,6 +104,15 @@ final class ZeroPatchCenter {
                 show(a);
             } else {
                 authenticated = false;
+            }
+            return;
+        }
+        if (requestCode == REQUEST_IMPORT_MODULE) {
+            if (resultCode == Activity.RESULT_OK && data != null && authenticated && data.getData() != null) {
+                try {
+                    importModule(a, data.getData());
+                    alert(a, "Native GX module staged", "The module will load on the next Play launch. If the game exits without a clean shutdown, this experimental module will be disabled for recovery.");
+                } catch (Exception e) { alert(a, "Module rejected", e.getMessage()); }
             }
             return;
         }
@@ -184,6 +194,29 @@ final class ZeroPatchCenter {
         editor.setText("C++ SOURCE LAB (EXPORT FOR COMPILATION)");
         layout.addView(editor);
         editor.setOnClickListener(v -> showCppDraft(a));
+        // ZERO_NATIVE_MODULE_V291_CENTER: controlled research-mode native .so import.
+        TextView moduleStatus = new TextView(a);
+        moduleStatus.setText("Native GX module: " + (prefs(a).getBoolean("module_enabled", false) ? "ENABLED" : "DISABLED")
+            + "\nSHA-256: " + prefs(a).getString("module_sha", "none"));
+        moduleStatus.setTextColor(Color.LTGRAY);
+        layout.addView(moduleStatus);
+        Button importButton = new Button(a);
+        importButton.setText("IMPORT ARM64 NATIVE GX MODULE (.so)");
+        layout.addView(importButton);
+        importButton.setOnClickListener(v -> {
+            Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            i.setType("*/*");
+            i.addCategory(Intent.CATEGORY_OPENABLE);
+            a.startActivityForResult(i, REQUEST_IMPORT_MODULE);
+        });
+        Button moduleToggle = new Button(a);
+        moduleToggle.setText("DISABLE NATIVE MODULE / RECOVERY MODE");
+        layout.addView(moduleToggle);
+        moduleToggle.setOnClickListener(v -> {
+            prefs(a).edit().putBoolean("module_enabled", false).putBoolean("module_pending", false).commit();
+            moduleStatus.setText("Native GX module: DISABLED (takes effect next Play launch)");
+            alert(a,"Native module disabled","The normal GX scan path will run on the next Play launch.");
+        });
         ScrollView scroller = new ScrollView(a);
         scroller.addView(layout);
         final AlertDialog dialog = new AlertDialog.Builder(a).setTitle("ZERO / Patch Center")
@@ -235,6 +268,72 @@ final class ZeroPatchCenter {
                 a.startActivityForResult(i, REQUEST_EXPORT_CPP);
             } else alert(a, "Saved", "Your C++ draft was saved privately; no native code changed.");
         } catch (Exception e) { alert(a, "Save failed", e.getMessage()); }
+    }
+
+    // Dynamic loading is explicitly confined to the developer package.
+    // Android 14+ demands read-only file state before loading code from app storage.
+    // Import through Storage Access Framework; do not execute arbitrary filenames or paths.
+    static String nativeModuleForLaunch(Context c) {
+        if (!allowed(c)) return "";
+        SharedPreferences p = prefs(c);
+        if (!p.getBoolean("module_enabled", false)) return "";
+        // A previous game process did not shut down cleanly. Fail closed on restart.
+        if (p.getBoolean("module_pending", false)) {
+            p.edit().putBoolean("module_enabled", false).putBoolean("module_pending", false).commit();
+            return "";
+        }
+        try {
+            File f = new File(c.getCodeCacheDir(), p.getString("module_filename", "NO_MODULE"));
+            if (!f.isFile() || f.length() <= 0 || f.length() > 16*1024*1024 || f.canWrite()) return "";
+            String checksum = sha(readSmall(f,16*1024*1024));
+            if (!checksum.equals(p.getString("module_sha", ""))) return "";
+            if (!p.edit().putBoolean("module_pending", true).commit()) return "";
+            return f.getAbsolutePath();
+        } catch (Exception ignored) { return ""; }
+    }
+    static void onGameDestroyed(Context c) {
+        if (allowed(c)) prefs(c).edit().putBoolean("module_pending", false).commit();
+    }
+    private static void importModule(Activity a, Uri uri) throws Exception {
+        File dir = a.getCodeCacheDir();
+        if (!dir.isDirectory() && !dir.mkdirs()) throw new IOException("Cannot open code cache");
+        // Import bytes into a new immutable file, not into a writable existing .so.
+        File tmp = File.createTempFile("zero-import-", ".tmp", dir);
+        try {
+            long copied=0;
+            try (InputStream in = a.getContentResolver().openInputStream(uri);
+                 FileOutputStream out = new FileOutputStream(tmp)) {
+                if (in==null) throw new IOException("Source unavailable");
+                byte[] buffer=new byte[16384]; int n;
+                while ((n=in.read(buffer))>=0) {
+                    copied+=n;
+                    if (copied > 16*1024*1024) throw new IOException("Module exceeds 16 MiB");
+                    out.write(buffer,0,n);
+                }
+                out.getFD().sync();
+            }
+            byte[] data=readSmall(tmp,16*1024*1024);
+            // ELF64 little-endian shared library, AArch64 e_machine=183.
+            if (data.length<64 || data[0]!=0x7f || data[1]!='E' || data[2]!='L' || data[3]!='F' ||
+                data[4]!=2 || data[5]!=1 || (data[16]&255)!=3 || data[17]!=0 ||
+                (data[18]&255)!=183 || data[19]!=0)
+                throw new IOException("Requires ARM64 ELF shared-object (.so), not a source file");
+            String hash=sha(data);
+            String name="libzero_"+hash.substring(0,24)+".so";
+            File target=new File(dir,name);
+            if (!target.exists()) {
+                if (!tmp.setReadable(true,true) || !tmp.setWritable(false,false))
+                    throw new IOException("Could not make native module read-only");
+                Files.move(tmp.toPath(),target.toPath());
+            } else {
+                if (target.canWrite() || !hash.equals(sha(readSmall(target,16*1024*1024))))
+                    throw new IOException("Existing module path differs; refusing overwrite");
+            }
+            if (!prefs(a).edit().putString("module_filename",name)
+                .putString("module_sha",hash).putBoolean("module_enabled",true)
+                .putBoolean("module_pending",false).commit())
+                throw new IOException("Failed to save imported module state");
+        } finally { tmp.delete(); }
     }
 
     private static void writeActive(Context c, byte[] bytes) throws Exception {

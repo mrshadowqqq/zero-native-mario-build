@@ -241,7 +241,8 @@ public final class LauncherActivity extends Activity {
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         // ZERO_PATCH_CENTER_V289_LAUNCHER: handle developer unlock and draft export first.
         if (requestCode == ZeroPatchCenter.REQUEST_AUTH ||
-            requestCode == ZeroPatchCenter.REQUEST_EXPORT_CPP) {
+            requestCode == ZeroPatchCenter.REQUEST_EXPORT_CPP ||
+            requestCode == ZeroPatchCenter.REQUEST_IMPORT_MODULE) { // ZERO_NATIVE_MODULE_V291_LAUNCHER
             ZeroPatchCenter.onActivityResult(this, requestCode, resultCode, data);
             return;
         }

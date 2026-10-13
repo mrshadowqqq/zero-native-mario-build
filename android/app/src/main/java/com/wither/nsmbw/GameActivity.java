@@ -74,6 +74,8 @@ public final class GameActivity extends SDLActivity
             Os.setenv("WIICOMPILED_DATA_DIR", AppFiles.dataDir(this).getAbsolutePath(), true);
             // ZERO_PATCH_CENTER_V289_GAME: strictly checked data recipe, not executable code.
             Os.setenv("ZERO_PATCH_FILE", ZeroPatchCenter.nativePatchFile(this), true);
+            // ZERO_NATIVE_MODULE_V291_GAME: read-only, app-private local ELF module.
+            Os.setenv("ZERO_NATIVE_MODULE_FILE", ZeroPatchCenter.nativeModuleForLaunch(this), true);
         } catch (Exception e) {
             ZeroDiagnostics.failure(this, "RUNTIME_PREPARE_FAILED", e);
             Log.e(TAG, "could not prepare the game's files", e);
@@ -240,6 +242,7 @@ public final class GameActivity extends SDLActivity
 
     @Override
     protected void onDestroy() {
+        ZeroPatchCenter.onGameDestroyed(this);
         ZeroDiagnostics.event(this, "GAME_ONDESTROY", "closing game process");
         if (multicastLock != null && multicastLock.isHeld()) {
             multicastLock.release();
