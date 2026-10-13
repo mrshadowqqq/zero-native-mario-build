@@ -2164,8 +2164,13 @@ class SDLMain implements Runnable {
         }
 
         SDLActivity.nativeInitMainThread();
-        SDLActivity.mSingleton.main();
-        SDLActivity.nativeCleanupMainThread();
+        com.wither.nsmbw.ZeroBootProbe.start(SDLActivity.mSingleton);
+        try {
+            SDLActivity.mSingleton.main();
+        } finally {
+            com.wither.nsmbw.ZeroBootProbe.stop();
+            SDLActivity.nativeCleanupMainThread();
+        }
 
         if (SDLActivity.mSingleton != null && !SDLActivity.mSingleton.isFinishing()) {
             // Let's finish the Activity

@@ -109,7 +109,7 @@ final class ZeroDiagnostics {
 
     static String report(Context c) {
         final StringBuilder out = new StringBuilder();
-        append(out, "ZERO Native Mario v2.8 diagnostic report\n");
+        append(out, "ZERO Native Mario v2.8.1 diagnostic report\n");
         append(out, "Generated: " + timestamp(System.currentTimeMillis()) + "\n");
         append(out, "Device: " + Build.MANUFACTURER + " " + Build.MODEL
                 + " / Android " + Build.VERSION.RELEASE + " / SDK " + Build.VERSION.SDK_INT + "\n");
@@ -131,9 +131,13 @@ final class ZeroDiagnostics {
             final File path = new File(runtime, item);
             append(out, "Runtime " + item + ": " + (path.exists() ? "present" : "missing") + "\n");
         }
-        final File nativeDir = new File(c.getApplicationInfo().nativeLibraryDir);
-        append(out, "Native main: " + new File(nativeDir, "libmain.so").isFile() + "\n");
-        append(out, "Native C++: " + new File(nativeDir, "libc++_shared.so").isFile() + "\n");
+        try (java.util.zip.ZipFile installedApk = new java.util.zip.ZipFile(c.getApplicationInfo().sourceDir)) {
+            append(out, "APK contains native main: " + (installedApk.getEntry("lib/arm64-v8a/libmain.so") != null) + "\n");
+            append(out, "APK contains native C++: " + (installedApk.getEntry("lib/arm64-v8a/libc++_shared.so") != null) + "\n");
+            append(out, "APK contains boot probe: " + (installedApk.getEntry("lib/arm64-v8a/libzero_bootprobe.so") != null) + "\n");
+        } catch (Exception error) {
+            append(out, "APK native entries inaccessible: " + error.getMessage() + "\n");
+        }
         append(out, "\n=== Recent process exits (system-reported) ===\n");
         if (Build.VERSION.SDK_INT >= 30) {
             try {
@@ -164,6 +168,15 @@ final class ZeroDiagnostics {
             append(out, "-- " + log.getParentFile().getName() + "/console.log --\n" + tail(log, 40000) + "\n");
         }
         if (nativeLogs.isEmpty()) append(out, "No native console.log yet. This DOES NOT prove the native game ran.\n");
+        append(out, "\n=== ZERO v2.8.1 native SDL-thread execution samples ===\n");
+        final List<File> probeLogs = filesIn(logRoot, ".log", 1);
+        int probeCount = 0;
+        for (File f : probeLogs) {
+            if (!f.getName().startsWith("zero-bootprobe-pid")) continue;
+            append(out, "-- " + f.getName() + " --\n" + tail(f, 16000) + "\n");
+            if (++probeCount >= 3) break;
+        }
+        if (probeCount == 0) append(out, "No native thread samples found (probe may not have loaded).\n");
         append(out, "\nGraphics frame submission is not yet instrumented in this build.\n");
         append(out, "Report excludes actual game file contents and native library bytes. Review before sharing.\n");
         return out.toString();

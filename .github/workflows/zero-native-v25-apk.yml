@@ -85,6 +85,22 @@ jobs:
             echo 'NOTICE: No additional assets were provided. APK may fail during game startup.'
           fi
 
+      - name: Build separate ZERO boot probe ARM64 library (no game relink)
+        run: |
+          set -euo pipefail
+          sdkmanager --install 'ndk;27.2.12479018'
+          NDK="$ANDROID_HOME/ndk/27.2.12479018"
+          CXX="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android30-clang++"
+          mkdir -p android/native/jniLibs/arm64-v8a
+          "$CXX" -std=c++17 -O2 -fPIC -shared -fvisibility=hidden \
+            -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384 \
+            -Wl,--no-undefined \
+            android/zero_bootprobe/zero_bootprobe.cpp -ldl \
+            -o android/native/jniLibs/arm64-v8a/libzero_bootprobe.so
+          readelf -h android/native/jniLibs/arm64-v8a/libzero_bootprobe.so | grep 'Machine:.*AArch64'
+          readelf -lW android/native/jniLibs/arm64-v8a/libzero_bootprobe.so | grep LOAD
+          readelf --dyn-syms -W android/native/jniLibs/arm64-v8a/libzero_bootprobe.so | grep 'Java_com_wither_nsmbw_ZeroBootProbe_nativeStart'
+
       - name: Compile and debug-sign the complete APK
         working-directory: android
         run: gradle --no-daemon --stacktrace :app:assembleDebug
@@ -96,6 +112,7 @@ jobs:
           test -s "$APK"
           unzip -l "$APK" | grep 'lib/arm64-v8a/libmain.so'
           unzip -l "$APK" | grep 'lib/arm64-v8a/libc++_shared.so'
+          unzip -l "$APK" | grep 'lib/arm64-v8a/libzero_bootprobe.so'
           "$ANDROID_HOME/build-tools/35.0.0/zipalign" -c -P 16 -v 4 "$APK" | tail -5
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose "$APK"
           sha256sum "$APK"
