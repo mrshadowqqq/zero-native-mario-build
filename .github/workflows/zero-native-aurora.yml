@@ -1,0 +1,159 @@
+name: ZERO Native Mario rev2 Aurora Android renderer (NOT APK)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  aurora-android:
+    name: Build pinned SDL3 + Aurora GX + Dawn Android library closure
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout PRIVATE workflow configuration
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Verify destination is private before downloads
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          test "$(gh api "repos/$GITHUB_REPOSITORY" --jq '.private')" = true || {
+            echo 'STOP: cloud build repository must remain PRIVATE.' >&2
+            exit 2
+          }
+          mkdir -p out/logs
+          echo 'ZERO Native Aurora renderer-only build: no game code, WBFS, saves or extracted assets required.' | tee out/summary.txt
+
+      - name: Install Android NDK 29 and public build tools
+        uses: android-actions/setup-android@v4
+
+      - name: Resolve official NDK and build utilities
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends cmake ninja-build zstd git python3
+          sdkmanager --install 'ndk;29.0.14206865'
+          ndk="$ANDROID_HOME/ndk/29.0.14206865"
+          test -f "$ndk/build/cmake/android.toolchain.cmake"
+          test -x "$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++"
+          echo "NDK_HOME=$ndk" >> "$GITHUB_ENV"
+          cmake --version | head -1
+          ninja --version
+
+      - name: Checkout pinned public Aurora source (no Nintendo data)
+        run: |
+          set -euo pipefail
+          git init -q upstream
+          git -C upstream remote add origin https://github.com/WitherBlitz/NSMB-Wii-Multiplayer-Recompilation.git
+          git -C upstream sparse-checkout init --cone
+          git -C upstream sparse-checkout set aurora-main
+          git -C upstream fetch --depth 1 origin 69ee62be4a28b14ae69c2a03443e3e376f5c3344
+          git -C upstream checkout --detach FETCH_HEAD
+          test "$(git -C upstream rev-parse HEAD)" = 69ee62be4a28b14ae69c2a03443e3e376f5c3344
+          test -s upstream/aurora-main/cmake/AuroraDawnProvider.cmake
+          test -s upstream/aurora-main/cmake/AuroraSDL3Provider.cmake
+          test -s upstream/aurora-main/lib/gx/gx.cpp
+
+      - name: Configure actual Android Aurora CMake graph with pinned SDL3 and Dawn
+        run: |
+          set -euo pipefail
+          mkdir -p out/logs aurora-driver
+          # Driver mirrors add_subdirectory(aurora-main) in the official runtime
+          # and avoids host-only examples/tests in a standalone Aurora configure.
+          cat > aurora-driver/CMakeLists.txt <<'EOF'
+          cmake_minimum_required(VERSION 3.25)
+          project(zero_native_aurora LANGUAGES C CXX)
+          add_subdirectory("${CMAKE_CURRENT_LIST_DIR}/../upstream/aurora-main" "${CMAKE_BINARY_DIR}/aurora-build")
+          EOF
+          # SHA-256 is the pinned Android prebuilt archive fingerprint documented
+          # in AuroraDawnProvider.cmake at the immutable upstream revision.
+          cmake -S aurora-driver -B build/aurora -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$NDK_HOME/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-30 \
+            -DANDROID_STL=c++_static \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DAURORA_ENABLE_GX=ON \
+            -DAURORA_ENABLE_CARD=OFF \
+            -DAURORA_ENABLE_DVD=OFF \
+            -DAURORA_DAWN_PROVIDER=package \
+            -DAURORA_DAWN_LINKAGE=static \
+            -DAURORA_DAWN_PACKAGE_URL='https://github.com/theofficialgman/dawn-build/releases/download/v20260603.191052/dawn-android-aarch64.tar.gz' \
+            -DAURORA_DAWN_PACKAGE_URL_HASH='SHA256=0e63e8cbf53551f703f582d1306f4257c0380353f66b53369d96952ce6d9f934' \
+            -DAURORA_SDL3_PROVIDER=vendor \
+            -DAURORA_SDL3_LINKAGE=static \
+            -DSDL_SHARED=OFF \
+            -DSDL_STATIC=ON \
+            -DSDL_TEST=OFF \
+            -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+            2>&1 | tee out/logs/configure.log
+          grep -Eq '^(CMAKE_ANDROID_ARCH_ABI|ANDROID_ABI):[^=]*=arm64-v8a$' build/aurora/CMakeCache.txt || \
+            { echo 'STOP: Android arm64 CMake ABI not present in configuration.' >&2; exit 3; }
+
+      - name: Compile real Aurora GX, input, video, core and Android SDL3 libraries
+        run: |
+          set -euo pipefail
+          cmake --build build/aurora --parallel 3 --target \
+            aurora_core aurora_gx aurora_pad aurora_si aurora_vi aurora_mtx aurora_main \
+            2>&1 | tee out/logs/build.log
+          : > out/targets.txt
+          for t in aurora_core aurora_gx aurora_pad aurora_si aurora_vi aurora_mtx aurora_main; do
+            mapfile -t matches < <(find build/aurora -type f -name "lib${t}.a" -print)
+            test "${#matches[@]}" = 1 || { echo "STOP: missing or duplicate $t libraries" >&2; exit 4; }
+            test -s "${matches[0]}" || exit 4
+            echo "$t ${matches[0]}" | tee -a out/targets.txt
+          done
+          # Every archive must contain a real arm64 ELF object; archives aren't
+          # evidence of the target architecture without inspecting members.
+          for t in aurora_core aurora_gx aurora_pad aurora_si aurora_vi aurora_mtx aurora_main; do
+            lib="$(awk -v t="$t" '$1==t {$1="";sub(/^ /,"");print}' out/targets.txt)"
+            member="$($NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar t "$lib" | head -1)"
+            test -n "$member"
+            mkdir -p "out/probe/$t"
+            (cd "out/probe/$t" && "$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar" x "$GITHUB_WORKSPACE/$lib" "$member")
+            readelf -h "out/probe/$t/$member" | grep -q 'Machine:.*AArch64' || { echo "STOP: $t is not AArch64" >&2; exit 4; }
+            rm -rf "out/probe/$t"
+          done
+          test "$(find build/aurora -type f -name '*SDL3*.a' | wc -l)" -ge 1 || {
+            echo 'STOP: SDL3 static library was not produced.' >&2
+            exit 4
+          }
+          echo 'PASS: core + GX + input/video + SDL3 static libraries compiled for Android AArch64.' | tee -a out/summary.txt
+
+      - name: Archive native static libraries for later final Android link
+        run: |
+          set -euo pipefail
+          find build/aurora -type f -name '*.a' -print | LC_ALL=C sort > out/archive_paths.txt
+          test "$(wc -l < out/archive_paths.txt)" -ge 8
+          du -ch $(cat out/archive_paths.txt) | tail -n 1 | tee -a out/summary.txt
+          # All inputs are public-source build products. Relative paths are
+          # preserved so the next stage can find dependency archives reliably.
+          tar -I 'zstd -3 -T2' -cf out/zero_aurora_android_arm64_libs.tar.zst -T out/archive_paths.txt
+          test -s out/zero_aurora_android_arm64_libs.tar.zst
+          sha256sum out/zero_aurora_android_arm64_libs.tar.zst | tee out/library_bundle.sha256
+          echo 'Aurora renderer static libraries only. No WiiCompiled libmain.so or Android APK yet.' | tee -a out/summary.txt
+
+      - name: Upload build logs and libraries (always retain failure evidence)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zero-rev2-android-aurora-v21
+          path: |
+            out/summary.txt
+            out/targets.txt
+            out/archive_paths.txt
+            out/library_bundle.sha256
+            out/zero_aurora_android_arm64_libs.tar.zst
+            out/logs/*.log
+          retention-days: 3
+          if-no-files-found: warn
