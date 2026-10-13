@@ -1,0 +1,291 @@
+name: ZERO Native rev2 full runtime coverage (strict, NOT APK)
+
+on:
+  workflow_dispatch:
+    inputs:
+      v20_run_id:
+        description: Successful private v2.0 GX run ID
+        required: true
+        type: string
+      v21_run_id:
+        description: Successful private v2.1 Aurora run ID
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  closure:
+    name: Compile remaining runtime units and strict-link audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout private workflow configuration
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Enforce private repository and validate source runs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          V20: ${{ inputs.v20_run_id }}
+          V21: ${{ inputs.v21_run_id }}
+        run: |
+          set -euo pipefail
+          [[ "$(gh api "repos/$GITHUB_REPOSITORY" --jq '.private')" == true ]] || {
+            echo 'STOP: game-derived artifacts require a PRIVATE repository.' >&2; exit 2;
+          }
+          [[ "$V20" =~ ^[0-9]+$ && "$V21" =~ ^[0-9]+$ ]] || exit 2
+          for id in "$V20" "$V21"; do
+            [[ "$(gh run view "$id" -R "$GITHUB_REPOSITORY" --json conclusion --jq '.conclusion')" == success ]] || {
+              echo "STOP: source run $id did not finish successfully." >&2; exit 2;
+            }
+          done
+          mkdir -p out/logs out/artifacts/v20 out/artifacts/v21 out/runtime-objects
+
+      - name: Install Android NDK and cross-build tools
+        uses: android-actions/setup-android@v4
+
+      - name: Configure pinned Android toolchain
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends zstd python3 ninja-build cmake curl bzip2
+          sdkmanager --install 'ndk;29.0.14206865'
+          bin="$ANDROID_HOME/ndk/29.0.14206865/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          test -x "$bin/aarch64-linux-android30-clang++"
+          echo "NDK_BIN=$bin" >> "$GITHUB_ENV"
+
+      - name: Reuse verified private game-GX and Aurora artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          V20: ${{ inputs.v20_run_id }}
+          V21: ${{ inputs.v21_run_id }}
+        run: |
+          set -euo pipefail
+          gh run download "$V20" -R "$GITHUB_REPOSITORY" -n zero-rev2-ndk-gx-sdl-v20 -D out/artifacts/v20
+          gh run download "$V21" -R "$GITHUB_REPOSITORY" -n zero-rev2-android-aurora-v21 -D out/artifacts/v21
+          test -s out/artifacts/v20/zero_rev2_v20_PARTIAL_UNRESOLVED.o
+          test -s out/artifacts/v21/zero_aurora_android_arm64_libs.tar.zst
+          test -s out/artifacts/v21/library_bundle.sha256
+          (cd out/artifacts/v21 && sha256sum -c library_bundle.sha256)
+          readelf -h out/artifacts/v20/zero_rev2_v20_PARTIAL_UNRESOLVED.o | grep -q 'Machine:.*AArch64'
+          mkdir -p out/libs
+          tar -I zstd -tf out/artifacts/v21/zero_aurora_android_arm64_libs.tar.zst > out/renderer_members.txt
+          if grep -E '(^/|(^|/)\.\.(/|$))' out/renderer_members.txt; then
+            echo 'STOP: unsafe entry in renderer archive.' >&2; exit 3;
+          fi
+          tar -I zstd -xf out/artifacts/v21/zero_aurora_android_arm64_libs.tar.zst -C out/libs
+          find out/libs -type f -name '*.a' -print | LC_ALL=C sort > out/available_libs.txt
+          test "$(wc -l < out/available_libs.txt)" -gt 15
+
+      - name: Retrieve pinned public runtime, SDL3 and Mbed TLS headers
+        run: |
+          set -euo pipefail
+          git init -q upstream
+          git -C upstream remote add origin https://github.com/WitherBlitz/NSMB-Wii-Multiplayer-Recompilation.git
+          git -C upstream sparse-checkout init --cone
+          git -C upstream sparse-checkout set runtime/src runtime/include runtime/cmake runtime/third_party aurora-main/include
+          git -C upstream fetch --depth 1 origin 69ee62be4a28b14ae69c2a03443e3e376f5c3344
+          git -C upstream checkout -q --detach FETCH_HEAD
+          test "$(git -C upstream rev-parse HEAD)" = 69ee62be4a28b14ae69c2a03443e3e376f5c3344
+          git init -q sdl
+          git -C sdl remote add origin https://github.com/libsdl-org/SDL.git
+          git -C sdl sparse-checkout init --cone
+          git -C sdl sparse-checkout set include
+          git -C sdl fetch --depth 1 origin 5848e584a1b606de26e3dbd1c7e4ecbc34f807a6
+          git -C sdl checkout -q --detach FETCH_HEAD
+          test -s sdl/include/SDL3/SDL_events.h
+          curl --fail --location --retry 3 --silent --show-error \
+            -o mbedtls-3.6.7.tar.bz2 \
+            https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-3.6.7/mbedtls-3.6.7.tar.bz2
+          echo 'a7e8bcbec0e6f761b4af24f25677626b35f762f68eef79c08677a363212d11f6  mbedtls-3.6.7.tar.bz2' | sha256sum -c -
+          mkdir -p mbedtls
+          tar -xjf mbedtls-3.6.7.tar.bz2 -C mbedtls --strip-components 1
+          test -f mbedtls/include/mbedtls/ssl.h
+
+      - name: Retrieve only private compile-time RuntimeConfig.h (not ROM assets)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p native-input/generated
+          gh release download zero-rev2-source-v1 -R "$GITHUB_REPOSITORY" \
+            -p RuntimeConfig.h -D "$RUNNER_TEMP"
+          test -s "$RUNNER_TEMP/RuntimeConfig.h"
+          cp "$RUNNER_TEMP/RuntimeConfig.h" native-input/generated/RuntimeConfig.h
+          echo 'Revision-2 RuntimeConfig.h available; game RAM initializer is NOT available.' > out/input_note.txt
+
+      - name: Compile all remaining genuine Android runtime source files
+        run: |
+          set -euo pipefail
+          # v2.0 already incorporates the first nine core files, the v1.9
+          # four provider files, and the full GX compatibility layer.
+          # Excluding them prevents multiple-definition false positives.
+          cat > out/excluded_prior_sources.txt <<'EOF'
+          abi_bridge.cpp
+          memory.cpp
+          guest_flat_memory.cpp
+          fpu_helpers.cpp
+          ppc_helpers.cpp
+          ppc_quantized.cpp
+          host_context.cpp
+          system_bridge.cpp
+          platform/host_platform.cpp
+          det_clock.cpp
+          recomp_mod_loader.cpp
+          hle/os/os_init.cpp
+          EOF
+          find upstream/runtime/src -type f -name '*.cpp' | LC_ALL=C sort > out/all_runtime_sources.txt
+          # Official, optional crash-symbolization fallback; this is NOT a game-data initializer.
+          printf '%s\n' upstream/runtime/cmake/guest_symbol_table_stub.cpp >> out/all_runtime_sources.txt
+          : > out/compile_status.tsv
+          : > out/skipped_sources.txt
+          : > out/missing_include_errors.txt
+          failed=0
+          built=0
+          while IFS= read -r source; do
+            case "$source" in
+              upstream/runtime/src/*) rel="${source#upstream/runtime/src/}" ;;
+              upstream/runtime/cmake/*) rel="cmake/${source##*/}" ;;
+              *) echo "STOP: unexpected runtime path $source" >&2; exit 5 ;;
+            esac
+            case "$rel" in
+              hle/gx/*|guest_flat_memory_macos.cpp|external_audio_macos.cpp|host_cpu_baseline.cpp|product/retro_rewind_product.cpp|platform/*)
+                echo "$rel" >> out/skipped_sources.txt; continue ;;
+            esac
+            if grep -Fxq "$rel" out/excluded_prior_sources.txt; then
+              echo "$rel" >> out/skipped_sources.txt; continue
+            fi
+            label="$(printf '%s' "$rel" | tr '/.' '__')"
+            obj="out/runtime-objects/${label}.o"
+            log="out/logs/compile_${label}.log"
+            if "$NDK_BIN/aarch64-linux-android30-clang++" \
+              -std=c++20 -O0 -fPIC -DNOMINMAX -DTARGET_PC -DSDL_MAIN_HANDLED \
+              -D_DISABLE_STRING_ANNOTATION -D_DISABLE_VECTOR_ANNOTATION \
+              -fno-fast-math -ffp-contract=off -fno-slp-vectorize \
+              -I "$GITHUB_WORKSPACE/upstream/runtime/include" \
+              -I "$GITHUB_WORKSPACE/upstream/runtime/src" \
+              -I "$GITHUB_WORKSPACE/upstream/runtime/third_party" \
+              -I "$GITHUB_WORKSPACE/upstream/runtime/third_party/toml11" \
+              -I "$GITHUB_WORKSPACE/upstream" \
+              -I "$GITHUB_WORKSPACE/upstream/aurora-main/include" \
+              -I "$GITHUB_WORKSPACE/sdl/include" \
+              -I "$GITHUB_WORKSPACE/mbedtls/include" \
+              -I "$GITHUB_WORKSPACE/native-input" \
+              -c "$source" -o "$obj" > "$log" 2>&1; then
+              built=$((built+1))
+              printf 'OK\t%s\n' "$rel" >> out/compile_status.tsv
+            else
+              failed=$((failed+1))
+              printf 'FAIL\t%s\n' "$rel" >> out/compile_status.tsv
+              { echo "=== $rel ==="; grep -m 4 -E 'error:|fatal error:' "$log" || tail -n 8 "$log"; } >> out/missing_include_errors.txt
+              rm -f "$obj"
+            fi
+          done < out/all_runtime_sources.txt
+          {
+            echo "Total public C++ runtime sources found: $(wc -l < out/all_runtime_sources.txt)"
+            echo "Excluded already-linked or non-Android sources: $(wc -l < out/skipped_sources.txt)"
+            echo "New runtime C++ sources compiled: $built"
+            echo "New runtime C++ source failures: $failed"
+            echo 'The original game-memory initialization remains missing; no playable .so is claimed.'
+          } | tee out/summary.txt
+          if ((failed)); then
+            echo 'STOP: source compilation incomplete; see compile_status.tsv and missing_include_errors.txt.' | tee -a out/summary.txt
+            exit 1
+          fi
+
+      - name: Merge runtime sources and enumerate ALL remaining symbols
+        run: |
+          set -euo pipefail
+          input=out/artifacts/v20/zero_rev2_v20_PARTIAL_UNRESOLVED.o
+          mapfile -t objects < <(find out/runtime-objects -name '*.o' -type f | LC_ALL=C sort)
+          test "${#objects[@]}" -gt 25
+          "$NDK_BIN/ld.lld" -r -o out/zero_rev2_v24_PARTIAL_UNRESOLVED.o \
+            "$input" "${objects[@]}" > out/logs/partial_link.log 2>&1 || {
+              cat out/logs/partial_link.log
+              echo 'STOP: duplicate definitions or incompatible objects.' | tee -a out/summary.txt
+              exit 1
+            }
+          readelf -h out/zero_rev2_v24_PARTIAL_UNRESOLVED.o | grep -q 'Machine:.*AArch64'
+          "$NDK_BIN/llvm-nm" -u -P "$input" | awk '{print $1}' | LC_ALL=C sort -u > out/undefined_before.txt
+          "$NDK_BIN/llvm-nm" -u -P out/zero_rev2_v24_PARTIAL_UNRESOLVED.o | awk '{print $1}' | LC_ALL=C sort -u > out/undefined_after.txt
+          comm -23 out/undefined_before.txt out/undefined_after.txt > out/defined_by_new_runtime.txt
+          comm -13 out/undefined_before.txt out/undefined_after.txt > out/new_dependencies.txt
+          {
+            echo "Undefined input names before: $(wc -l < out/undefined_before.txt)"
+            echo "Undefined input names after: $(wc -l < out/undefined_after.txt)"
+            echo "Previously missing definitions supplied: $(wc -l < out/defined_by_new_runtime.txt)"
+            echo "New dependencies introduced: $(wc -l < out/new_dependencies.txt)"
+          } | tee -a out/summary.txt
+          "$NDK_BIN/llvm-ar" rcs out/libzero_rev2_runtime_partial.a \
+            out/zero_rev2_v24_PARTIAL_UNRESOLVED.o
+
+      - name: Attempt strict full Android shared-library link
+        run: |
+          set -euo pipefail
+          mapfile -t libs < out/available_libs.txt
+          set +e
+          "$NDK_BIN/aarch64-linux-android30-clang++" \
+            -shared -fPIC -static-libstdc++ -fuse-ld=lld \
+            -Wl,-soname,libmain.so -Wl,-z,max-page-size=16384 \
+            -Wl,--no-undefined -Wl,--error-limit=0 -Wl,--no-gc-sections \
+            -o out/libmain.so out/zero_rev2_v24_PARTIAL_UNRESOLVED.o \
+            -Wl,--start-group "${libs[@]}" -Wl,--end-group \
+            -landroid -llog -ldl -lm -lz -latomic -lvulkan -lEGL -lGLESv2 -lGLESv3 \
+            -lOpenSLES -lOpenMAXAL -laaudio -lmediandk -ljnigraphics \
+            > out/logs/strict_link.log 2>&1
+          code=$?
+          set -e
+          echo "Strict link exit code: $code" | tee -a out/summary.txt
+          if ((code)); then
+            rm -f out/libmain.so
+            grep -E 'undefined symbol:|duplicate symbol:|error:' out/logs/strict_link.log \
+              | LC_ALL=C sort -u > out/link_errors.txt || true
+            echo "Distinct linker errors: $(wc -l < out/link_errors.txt)" | tee -a out/summary.txt
+            sed -n '1,90p' out/logs/strict_link.log
+            echo 'STOP: libmain.so does not exist; missing genuine providers or data must be fixed.' | tee -a out/summary.txt
+            exit 1
+          fi
+          readelf -h out/libmain.so | tee out/elf_header.txt
+          readelf -h out/libmain.so | grep -q 'Type:.*DYN'
+          readelf -h out/libmain.so | grep -q 'Machine:.*AArch64'
+          "$NDK_BIN/llvm-nm" -D --defined-only out/libmain.so > out/exports.txt
+          grep -q SDL_main out/exports.txt || {
+            rm -f out/libmain.so; echo 'STOP: SDL_main is missing' >&2; exit 1;
+          }
+          sha256sum out/libmain.so > out/libmain.sha256
+          echo 'Strict link passed. Playability NOT verified; revision-2 memory initializer and Android APK remain outstanding.' | tee -a out/summary.txt
+
+      - name: Retain diagnostics and reusable runtime archive on failure or success
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zero-rev2-full-runtime-audit-v24
+          if-no-files-found: warn
+          retention-days: 3
+          path: |
+            out/summary.txt
+            out/input_note.txt
+            out/compile_status.tsv
+            out/missing_include_errors.txt
+            out/skipped_sources.txt
+            out/all_runtime_sources.txt
+            out/excluded_prior_sources.txt
+            out/defined_by_new_runtime.txt
+            out/new_dependencies.txt
+            out/undefined_before.txt
+            out/undefined_after.txt
+            out/link_errors.txt
+            out/logs/strict_link.log
+            out/logs/partial_link.log
+            out/logs/compile_*.log
+            out/libzero_rev2_runtime_partial.a
+            out/libmain.so
+            out/libmain.sha256
+            out/elf_header.txt
