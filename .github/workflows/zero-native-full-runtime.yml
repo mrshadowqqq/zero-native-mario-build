@@ -73,7 +73,25 @@ jobs:
           test -s out/artifacts/v20/zero_rev2_v20_PARTIAL_UNRESOLVED.o
           test -s out/artifacts/v21/zero_aurora_android_arm64_libs.tar.zst
           test -s out/artifacts/v21/library_bundle.sha256
-          (cd out/artifacts/v21 && sha256sum -c library_bundle.sha256)
+          # v2.1's checksum records the path from its *original* runner:
+          #   out/zero_aurora_android_arm64_libs.tar.zst
+          # GitHub artifact download flattens that file under out/artifacts/v21.
+          # Verify both the expected archived name and the actual downloaded bytes.
+          manifest=out/artifacts/v21/library_bundle.sha256
+          bundle=out/artifacts/v21/zero_aurora_android_arm64_libs.tar.zst
+          [[ "$(wc -l < "$manifest")" -eq 1 ]] || {
+            echo 'STOP: renderer checksum manifest must have exactly one entry.' >&2; exit 3;
+          }
+          expected_name="$(awk 'NR==1 {print $2}' "$manifest")"
+          expected_hash="$(awk 'NR==1 {print $1}' "$manifest")"
+          [[ "$expected_name" == 'out/zero_aurora_android_arm64_libs.tar.zst' ]] || {
+            echo "STOP: unexpected renderer manifest path: $expected_name" >&2; exit 3;
+          }
+          [[ "$expected_hash" =~ ^[0-9a-fA-F]{64}$ ]] || {
+            echo 'STOP: malformed renderer SHA256 digest.' >&2; exit 3;
+          }
+          printf '%s  %s\n' "$expected_hash" "$bundle" | sha256sum -c -
+          echo 'PASS: downloaded Aurora archive matches the original v2.1 SHA256.'
           readelf -h out/artifacts/v20/zero_rev2_v20_PARTIAL_UNRESOLVED.o | grep -q 'Machine:.*AArch64'
           mkdir -p out/libs
           tar -I zstd -tf out/artifacts/v21/zero_aurora_android_arm64_libs.tar.zst > out/renderer_members.txt
