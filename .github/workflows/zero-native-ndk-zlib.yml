@@ -1,0 +1,39 @@
+name: ZERO Native rev2 NDK29 zlib provider v2.4.7 (public only)
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  ndk-zlib:
+    name: Export pinned Android zlib linker stub (no game data)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Require private ZERO repository
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          [[ "$(gh api "repos/$GITHUB_REPOSITORY" --jq '.private')" == true ]] || exit 2
+      - name: Install Android command line tools
+        uses: android-actions/setup-android@v4
+      - name: Export pinned NDK29 Android zlib link stub
+        run: |
+          set -euo pipefail
+          sdkmanager --install 'ndk;29.0.14206865'
+          SYSROOT="$ANDROID_HOME/ndk/29.0.14206865/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
+          SRC="$SYSROOT/usr/lib/aarch64-linux-android/24/libz.so"
+          test -s "$SRC" || { echo 'Missing NDK public API24 libz stub' >&2;exit 3; }
+          mkdir -p out/zlib
+          cp "$SRC" out/zlib/libz.so
+          readelf -h out/zlib/libz.so | grep -F 'AArch64'
+          readelf -d out/zlib/libz.so | grep -F 'Library soname: [libz.so]'
+          (cd out/zlib && sha256sum libz.so > zlib.sha256)
+          printf 'Android NDK: 29.0.14206865\nABI: arm64-v8a\nAPI: 24\nPurpose: linker stub only, NEVER pack into APK.\n' > out/zlib/manifest.txt
+      - name: Upload public NDK zlib stub
+        uses: actions/upload-artifact@v4
+        with:
+          name: zero-rev2-ndk29-zlib-v247
+          retention-days: 7
+          if-no-files-found: error
+          path: out/zlib/*
