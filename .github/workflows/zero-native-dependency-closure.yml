@@ -1,0 +1,429 @@
+name: ZERO Native rev2 dependency closure v2.4.3 (strict, NOT APK)
+
+on:
+  workflow_dispatch:
+    inputs:
+      v20_run_id:
+        description: Successful PRIVATE v2.0 game/GX ARM64 archive run
+        required: true
+        type: string
+      v21_run_id:
+        description: Successful PRIVATE v2.1 Android Aurora build run
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  closure:
+    name: Compile eight GX providers plus CryptoPP and Mbed TLS; strict link
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout private workflow configuration
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Enforce PRIVATE repository and check source runs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          V20: ${{ inputs.v20_run_id }}
+          V21: ${{ inputs.v21_run_id }}
+        run: |
+          set -euo pipefail
+          [[ "$(gh api "repos/$GITHUB_REPOSITORY" --jq '.private')" == true ]] || { echo 'STOP: require PRIVATE repository.' >&2; exit 2; }
+          [[ "$V20" =~ ^[0-9]+$ && "$V21" =~ ^[0-9]+$ ]] || { echo 'STOP: invalid source run IDs' >&2; exit 2; }
+          [[ "$(gh run view "$V21" -R "$GITHUB_REPOSITORY" --json conclusion --jq '.conclusion')" == success ]] || { echo 'STOP: Aurora v2.1 must have succeeded.' >&2; exit 2; }
+          [[ "$(gh run view "$V20" -R "$GITHUB_REPOSITORY" --json conclusion --jq '.conclusion')" == success ]] || { echo 'STOP: game/GX v2.0 must have succeeded.' >&2; exit 2; }
+          mkdir -p out/logs out/artifacts/v20 out/artifacts/v21 out/libs out/gx-objects out/runtime-objects
+
+      - name: Install Android NDK 29 toolchain and host build utilities
+        uses: android-actions/setup-android@v4
+
+      - name: Configure Android NDK and CMake
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends cmake ninja-build zstd bzip2 curl python3
+          sdkmanager --install 'ndk;29.0.14206865'
+          echo "NDK=$ANDROID_HOME/ndk/29.0.14206865" >> "$GITHUB_ENV"
+          echo "NDK_BIN=$ANDROID_HOME/ndk/29.0.14206865/toolchains/llvm/prebuilt/linux-x86_64/bin" >> "$GITHUB_ENV"
+          test -x "$ANDROID_HOME/ndk/29.0.14206865/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android30-clang++"
+
+      - name: Download and validate existing PRIVATE v2.0 and Aurora archives
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          V20: ${{ inputs.v20_run_id }}
+          V21: ${{ inputs.v21_run_id }}
+        run: |
+          set -euo pipefail
+          gh run download "$V20" -R "$GITHUB_REPOSITORY" -n zero-rev2-ndk-gx-sdl-v20 -D out/artifacts/v20
+          gh run download "$V21" -R "$GITHUB_REPOSITORY" -n zero-rev2-android-aurora-v21 -D out/artifacts/v21
+          test -s out/artifacts/v20/zero_rev2_v20_PARTIAL_UNRESOLVED.o
+          readelf -h out/artifacts/v20/zero_rev2_v20_PARTIAL_UNRESOLVED.o | grep -q 'Machine:.*AArch64'
+          manifest=out/artifacts/v21/library_bundle.sha256
+          bundle=out/artifacts/v21/zero_aurora_android_arm64_libs.tar.zst
+          test -s "$manifest" && test -s "$bundle"
+          [[ "$(wc -l < "$manifest")" -eq 1 ]] || exit 3
+          [[ "$(awk 'NR==1{print $2}' "$manifest")" == out/zero_aurora_android_arm64_libs.tar.zst ]] || exit 3
+          h="$(awk 'NR==1{print $1}' "$manifest")"
+          [[ "$h" =~ ^[0-9a-fA-F]{64}$ ]] || exit 3
+          printf '%s  %s\n' "$h" "$bundle" | sha256sum -c -
+          tar -I zstd -tf "$bundle" > out/renderer_members.txt
+          ! grep -E '(^/|(^|/)\.\.(/|$))' out/renderer_members.txt
+          tar -I zstd -xf "$bundle" -C out/libs
+          find out/libs -type f -name '*.a' -print | LC_ALL=C sort > out/available_libs.txt
+          test "$(wc -l < out/available_libs.txt)" -gt 15
+          echo 'PASS: verified existing private game/GX archive and Aurora archives' | tee out/summary.txt
+
+      - name: Retrieve pinned public GX source and dependencies
+        run: |
+          set -euo pipefail
+          git init -q upstream
+          git -C upstream remote add origin https://github.com/WitherBlitz/NSMB-Wii-Multiplayer-Recompilation.git
+          git -C upstream sparse-checkout init --cone
+          git -C upstream sparse-checkout set runtime/src runtime/include runtime/third_party runtime/cmake aurora-main/include
+          git -C upstream fetch --depth 1 origin 69ee62be4a28b14ae69c2a03443e3e376f5c3344
+          git -C upstream checkout -q --detach FETCH_HEAD
+          [[ "$(git -C upstream rev-parse HEAD)" == 69ee62be4a28b14ae69c2a03443e3e376f5c3344 ]] || exit 4
+          test -s upstream/runtime/src/hle/gx/gx_dl.cpp
+          test -s upstream/runtime/third_party/cryptopp/cryptlib.h
+          git init -q sdl
+          git -C sdl remote add origin https://github.com/libsdl-org/SDL.git
+          git -C sdl sparse-checkout init --cone
+          git -C sdl sparse-checkout set include
+          git -C sdl fetch --depth 1 origin 5848e584a1b606de26e3dbd1c7e4ecbc34f807a6
+          git -C sdl checkout -q --detach FETCH_HEAD
+          test -s sdl/include/SDL3/SDL_events.h
+          curl --fail --location --retry 3 --silent --show-error -o mbedtls-3.6.7.tar.bz2 \
+            https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-3.6.7/mbedtls-3.6.7.tar.bz2
+          echo 'a7e8bcbec0e6f761b4af24f25677626b35f762f68eef79c08677a363212d11f6  mbedtls-3.6.7.tar.bz2' | sha256sum -c -
+          mkdir -p mbedtls
+          tar -xjf mbedtls-3.6.7.tar.bz2 -C mbedtls --strip-components 1
+          test -s mbedtls/include/mbedtls/ssl.h
+          # Recompile the runtime with matching pinned headers and Crypto++ ABI definitions.
+          # No original game-data sections are fetched or uploaded.
+          mkdir -p deps/imgui deps/xxhash
+          curl --fail --location --retry 3 --silent --show-error -o imgui.tgz \
+            https://github.com/ocornut/imgui/archive/refs/tags/v1.91.9b-docking.tar.gz
+          echo '466fdef9b18de15f0bb6e288e3d00ffa3d82200ec458ce5e4f724a161d9528a5  imgui.tgz' | sha256sum -c -
+          tar --no-same-owner -xzf imgui.tgz --strip-components=1 -C deps/imgui
+          curl --fail --location --retry 3 --silent --show-error -o xxhash.tgz \
+            https://github.com/Cyan4973/xxHash/archive/refs/tags/v0.8.4.tar.gz
+          echo '5738270935e7c3d38a79b3adf7c9692566ce7895a25f67de43ad52ab504acd32  xxhash.tgz' | sha256sum -c -
+          tar --no-same-owner -xzf xxhash.tgz --strip-components=1 -C deps/xxhash
+
+      - name: Retrieve only PRIVATE compile-time revision-2 configuration (NO ROM or assets)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p native-input/generated
+          gh release download zero-rev2-source-v1 -R "$GITHUB_REPOSITORY" -p RuntimeConfig.h -D "$RUNNER_TEMP"
+          test -s "$RUNNER_TEMP/RuntimeConfig.h"
+          cp "$RUNNER_TEMP/RuntimeConfig.h" native-input/generated/RuntimeConfig.h
+          echo 'No game data initializer or WBFS is available to this workflow.' > out/data_initialization_note.txt
+
+      - name: Recompile 68 genuine runtime C++ files with correct upstream CryptoPP ABI
+        run: |
+          set -euo pipefail
+          # v2.0 already incorporates the first nine core files, the v1.9
+          # four provider files, and the full GX compatibility layer.
+          # Excluding them prevents multiple-definition false positives.
+          cat > out/excluded_prior_sources.txt <<'EOF'
+          abi_bridge.cpp
+          memory.cpp
+          guest_flat_memory.cpp
+          fpu_helpers.cpp
+          ppc_helpers.cpp
+          ppc_quantized.cpp
+          host_context.cpp
+          system_bridge.cpp
+          platform/host_platform.cpp
+          det_clock.cpp
+          recomp_mod_loader.cpp
+          hle/os/os_init.cpp
+          EOF
+          find upstream/runtime/src -type f -name '*.cpp' | LC_ALL=C sort > out/all_runtime_sources.txt
+          # Official, optional crash-symbolization fallback; this is NOT a game-data initializer.
+          printf '%s\n' upstream/runtime/cmake/guest_symbol_table_stub.cpp >> out/all_runtime_sources.txt
+          printf '%s\n' upstream/runtime/third_party/pugixml/pugixml.cpp >> out/all_runtime_sources.txt
+          : > out/compile_status.tsv
+          : > out/skipped_sources.txt
+          : > out/missing_include_errors.txt
+          failed=0
+          built=0
+          while IFS= read -r source; do
+            case "$source" in
+              upstream/runtime/src/*) rel="${source#upstream/runtime/src/}" ;;
+              upstream/runtime/cmake/*) rel="cmake/${source##*/}" ;;
+              upstream/runtime/third_party/pugixml/*) rel="third_party/pugixml/${source##*/}" ;;
+              *) echo "STOP: unexpected runtime path $source" >&2; exit 5 ;;
+            esac
+            case "$rel" in
+              hle/gx/*|guest_flat_memory_macos.cpp|external_audio_macos.cpp|host_cpu_baseline.cpp|product/retro_rewind_product.cpp|platform/*)
+                echo "$rel" >> out/skipped_sources.txt; continue ;;
+            esac
+            if grep -Fxq "$rel" out/excluded_prior_sources.txt; then
+              echo "$rel" >> out/skipped_sources.txt; continue
+            fi
+            label="$(printf '%s' "$rel" | tr '/.' '__')"
+            obj="out/runtime-objects/${label}.o"
+            log="out/logs/compile_${label}.log"
+            if "$NDK_BIN/aarch64-linux-android30-clang++" \
+              -std=c++20 -O0 -fPIC -DNOMINMAX -DTARGET_PC -DSDL_MAIN_HANDLED \
+                    -DCRYPTOPP_DISABLE_ASM -DCRYPTOPP_NO_GLOBAL_BYTE \
+              -D_DISABLE_STRING_ANNOTATION -D_DISABLE_VECTOR_ANNOTATION \
+              -fno-fast-math -ffp-contract=off -fno-slp-vectorize \
+              '-DIMGUI_USER_CONFIG="aurora/imgui_config.h"' \
+              -I "$GITHUB_WORKSPACE/upstream/runtime/include" \
+              -I "$GITHUB_WORKSPACE/upstream/runtime/src" \
+              -I "$GITHUB_WORKSPACE/upstream/runtime/third_party" \
+              -I "$GITHUB_WORKSPACE/upstream/runtime/third_party/toml11" \
+              -I "$GITHUB_WORKSPACE/upstream/runtime/third_party/pugixml" \
+              -I "$GITHUB_WORKSPACE/deps/imgui" \
+              -I "$GITHUB_WORKSPACE/deps/xxhash" \
+              -I "$GITHUB_WORKSPACE/upstream" \
+              -I "$GITHUB_WORKSPACE/upstream/aurora-main/include" \
+              -I "$GITHUB_WORKSPACE/sdl/include" \
+              -I "$GITHUB_WORKSPACE/mbedtls/include" \
+              -I "$GITHUB_WORKSPACE/native-input" \
+              -c "$source" -o "$obj" > "$log" 2>&1; then
+              built=$((built+1))
+              printf 'OK\t%s\n' "$rel" >> out/compile_status.tsv
+            else
+              failed=$((failed+1))
+              printf 'FAIL\t%s\n' "$rel" >> out/compile_status.tsv
+              { echo "=== $rel ==="; grep -m 4 -E 'error:|fatal error:' "$log" || tail -n 8 "$log"; } >> out/missing_include_errors.txt
+              rm -f "$obj"
+            fi
+          done < out/all_runtime_sources.txt
+          {
+            echo "Total public C++ runtime sources found: $(wc -l < out/all_runtime_sources.txt)"
+            echo "Excluded already-linked or non-Android sources: $(wc -l < out/skipped_sources.txt)"
+            echo "New runtime C++ sources compiled: $built"
+            echo "New runtime C++ source failures: $failed"
+            echo 'The original game-memory initialization remains missing; no playable .so is claimed.'
+          } | tee out/summary.txt
+          if ((failed)); then
+            echo 'STOP: source compilation incomplete; see compile_status.tsv and missing_include_errors.txt.' | tee -a out/summary.txt
+            exit 1
+          fi
+          
+          [[ "$built" -eq 68 ]] || { echo "STOP: expected 68 runtime objects, built $built" >&2; exit 5; }
+
+      - name: Compile eight missing REAL GX provider files
+        run: |
+          set -euo pipefail
+          cat > out/gx_sources.txt <<'EOF'
+          gx_copy.cpp
+          gx_dl.cpp
+          gx_egg.cpp
+          gx_fatal_stubs.cpp
+          gx_guest_write_hooks.cpp
+          gx_indirect.cpp
+          gx_init.cpp
+          gx_nsmbw.cpp
+          EOF
+          : > out/gx_status.tsv
+          failed=0
+          while IFS= read -r file; do
+            src="upstream/runtime/src/hle/gx/$file"
+            obj="out/gx-objects/${file%.cpp}.o"
+            log="out/logs/gx_${file%.cpp}.log"
+            test -s "$src"
+            if "$NDK_BIN/aarch64-linux-android30-clang++" \
+              -std=c++20 -O0 -fPIC -DNOMINMAX -DTARGET_PC -DSDL_MAIN_HANDLED \
+              -DCRYPTOPP_DISABLE_ASM -DCRYPTOPP_NO_GLOBAL_BYTE \
+              -D_DISABLE_STRING_ANNOTATION -D_DISABLE_VECTOR_ANNOTATION \
+              -fno-fast-math -ffp-contract=off -fno-slp-vectorize \
+              '-DIMGUI_USER_CONFIG="aurora/imgui_config.h"' \
+              -I "$GITHUB_WORKSPACE/upstream/runtime/include" \
+              -I "$GITHUB_WORKSPACE/upstream/runtime/src" \
+              -I "$GITHUB_WORKSPACE/upstream/runtime/third_party" \
+              -I "$GITHUB_WORKSPACE/upstream/runtime/third_party/toml11" \
+              -I "$GITHUB_WORKSPACE/upstream/runtime/third_party/pugixml" \
+              -I "$GITHUB_WORKSPACE/deps/imgui" \
+              -I "$GITHUB_WORKSPACE/deps/xxhash" \
+              -I "$GITHUB_WORKSPACE/upstream" \
+              -I "$GITHUB_WORKSPACE/upstream/aurora-main/include" \
+              -I "$GITHUB_WORKSPACE/sdl/include" \
+              -I "$GITHUB_WORKSPACE/mbedtls/include" \
+              -I "$GITHUB_WORKSPACE/native-input" \
+              -c "$src" -o "$obj" > "$log" 2>&1; then
+              printf 'OK\t%s\n' "$file" | tee -a out/gx_status.tsv
+            else
+              failed=$((failed+1))
+              printf 'FAIL\t%s\n' "$file" | tee -a out/gx_status.tsv
+              grep -m 8 -E '(error:|fatal error:)' "$log" || tail -20 "$log"
+            fi
+          done < out/gx_sources.txt
+          echo "GX provider source failures: $failed" | tee -a out/summary.txt
+          (( failed == 0 )) || { echo 'STOP: GX provider compilation failed' >&2; exit 5; }
+          [[ "$(find out/gx-objects -name '*.o' | wc -l)" -eq 8 ]] || exit 5
+
+      - name: Compile pinned Mbed TLS 3.6.7 as Android ARM64 static libraries
+        run: |
+          set -euo pipefail
+          cmake -S mbedtls -B out/mbedtls-build -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-30 \
+            -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
+            -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+            -DENABLE_PROGRAMS=OFF -DENABLE_TESTING=OFF \
+            -DMBEDTLS_FATAL_WARNINGS=OFF -DDISABLE_PACKAGE_CONFIG_AND_INSTALL=ON \
+            > out/logs/mbedtls_configure.log 2>&1 || { tail -100 out/logs/mbedtls_configure.log; exit 6; }
+          cmake --build out/mbedtls-build -j 2 --target mbedtls mbedx509 mbedcrypto \
+            > out/logs/mbedtls_compile.log 2>&1 || { tail -100 out/logs/mbedtls_compile.log; exit 6; }
+          for part in mbedtls mbedx509 mbedcrypto; do
+            path="out/mbedtls-build/library/lib${part}.a"
+            test -s "$path" || { echo "STOP: missing $path" >&2; exit 6; }
+            "$NDK_BIN/llvm-ar" t "$path" > "out/logs/${part}_archive_members.txt"
+            sed -n '1p' "out/logs/${part}_archive_members.txt"
+            cp "$path" "out/libs/libzero_${part}.a"
+          done
+          echo 'PASS: 3 Mbed TLS ARM64 static libraries compiled' | tee -a out/summary.txt
+
+      - name: Compile vendored CryptoPP 8.9.0 with upstream ABI definitions
+        run: |
+          set -euo pipefail
+          mkdir -p out/cryptopp-cmake
+          cat > out/cryptopp-cmake/CMakeLists.txt <<'EOF'
+          cmake_minimum_required(VERSION 3.22)
+          project(ZeroCryptoPP LANGUAGES C CXX)
+          set(CMAKE_CXX_STANDARD 17)
+          set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+          file(GLOB SOURCES CONFIGURE_DEPENDS "${CRYPTOPP_ROOT}/*.cpp")
+          list(FILTER SOURCES EXCLUDE REGEX "/(adhoc|bench[123]|datatest|dlltest|fipsalgt|fipstest|pch|regtest[1234]|simple|test|validat[0-9]+)\\.cpp$")
+          list(FILTER SOURCES EXCLUDE REGEX "(_avx|_ppc|_simd|_sse)\\.cpp$")
+          add_library(zero_cryptopp STATIC ${SOURCES})
+          target_include_directories(zero_cryptopp SYSTEM PUBLIC "${CRYPTOPP_THIRD_PARTY}")
+          target_compile_definitions(zero_cryptopp PUBLIC CRYPTOPP_DISABLE_ASM CRYPTOPP_NO_GLOBAL_BYTE)
+          target_compile_options(zero_cryptopp PRIVATE -w)
+          if(EXISTS "${NDK_CPUFEATURES_DIR}/cpu-features.c")
+            target_sources(zero_cryptopp PRIVATE "${NDK_CPUFEATURES_DIR}/cpu-features.c")
+            target_include_directories(zero_cryptopp PRIVATE "${NDK_CPUFEATURES_DIR}")
+          endif()
+          EOF
+          cmake -S out/cryptopp-cmake -B out/cryptopp-build -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-30 \
+            -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
+            -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+            -DCRYPTOPP_ROOT="$GITHUB_WORKSPACE/upstream/runtime/third_party/cryptopp" \
+            -DCRYPTOPP_THIRD_PARTY="$GITHUB_WORKSPACE/upstream/runtime/third_party" \
+            -DNDK_CPUFEATURES_DIR="$NDK/sources/android/cpufeatures" \
+            > out/logs/cryptopp_configure.log 2>&1 || { tail -100 out/logs/cryptopp_configure.log; exit 7; }
+          cmake --build out/cryptopp-build -j 2 --target zero_cryptopp \
+            > out/logs/cryptopp_compile.log 2>&1 || { tail -120 out/logs/cryptopp_compile.log; exit 7; }
+          test -s out/cryptopp-build/libzero_cryptopp.a || exit 7
+          cp out/cryptopp-build/libzero_cryptopp.a out/libs/libzero_cryptopp.a
+          echo 'PASS: CryptoPP Android ARM64 archive built' | tee -a out/summary.txt
+
+      - name: Merge missing GX into existing PRIVATE compiled game + runtime code
+        run: |
+          set -euo pipefail
+          mapfile -t gx < <(find out/gx-objects -name '*.o' -type f | LC_ALL=C sort)
+          [[ "${#gx[@]}" -eq 8 ]] || exit 8
+          mapfile -t runtime < <(find out/runtime-objects -name '*.o' -type f | LC_ALL=C sort)
+          [[ "${#runtime[@]}" -eq 68 ]] || { echo 'STOP: expected 68 runtime objects' >&2; exit 8; }
+          "$NDK_BIN/ld.lld" -r -o out/zero_rev2_v243_PARTIAL_UNRESOLVED.o \
+            out/artifacts/v20/zero_rev2_v20_PARTIAL_UNRESOLVED.o "${runtime[@]}" "${gx[@]}" \
+            > out/logs/partial_link.log 2>&1 || { cat out/logs/partial_link.log; exit 8; }
+          readelf -h out/zero_rev2_v243_PARTIAL_UNRESOLVED.o | grep -q 'Machine:.*AArch64'
+          "$NDK_BIN/llvm-nm" -u -P out/artifacts/v20/zero_rev2_v20_PARTIAL_UNRESOLVED.o | awk '{print $1}' | LC_ALL=C sort -u > out/undefined_before.txt
+          "$NDK_BIN/llvm-nm" -u -P out/zero_rev2_v243_PARTIAL_UNRESOLVED.o | awk '{print $1}' | LC_ALL=C sort -u > out/undefined_after.txt
+          comm -23 out/undefined_before.txt out/undefined_after.txt > out/new_gx_definitions.txt
+          echo "New runtime and GX definitions satisfied: $(wc -l < out/new_gx_definitions.txt)" | tee -a out/summary.txt
+          "$NDK_BIN/llvm-ar" rcs out/libzero_rev2_runtime_partial_v243.a out/zero_rev2_v243_PARTIAL_UNRESOLVED.o
+
+      - name: Strict Android shared-library linker audit (no missing-symbol bypass)
+        run: |
+          set -euo pipefail
+          find out/libs -type f -name '*.a' -print | LC_ALL=C sort > out/all_link_libs.txt
+          mapfile -t libs < out/all_link_libs.txt
+          set +e
+          "$NDK_BIN/aarch64-linux-android30-clang++" \
+            -shared -fPIC -static-libstdc++ -fuse-ld=lld \
+            -Wl,-soname,libmain.so -Wl,-z,max-page-size=16384 \
+            -Wl,--no-undefined -Wl,--error-limit=0 -Wl,--no-gc-sections \
+            -o out/libmain.so out/zero_rev2_v243_PARTIAL_UNRESOLVED.o \
+            -Wl,--start-group "${libs[@]}" -Wl,--end-group \
+            -landroid -llog -ldl -lm -lz -latomic -lvulkan -lEGL -lGLESv2 -lGLESv3 \
+            -lOpenSLES -lOpenMAXAL -laaudio -lmediandk -ljnigraphics \
+            > out/logs/strict_link.log 2>&1
+          code=$?
+          set -e
+          echo "Strict link exit code: $code" | tee -a out/summary.txt
+          if ((code)); then
+            rm -f out/libmain.so
+            grep -E 'undefined symbol:|duplicate symbol:|error:' out/logs/strict_link.log \
+              | LC_ALL=C sort -u > out/link_errors.txt || true
+            echo "Distinct linker errors: $(wc -l < out/link_errors.txt)" | tee -a out/summary.txt
+            sed -n '1,120p' out/logs/strict_link.log
+            echo 'STOP: no libmain.so. Revision-2 game-memory initializer remains absent.' | tee -a out/summary.txt
+            exit 1
+          fi
+          # Successful link is not enough: the data initializer is PRIVATE and required.
+          test -s out/libmain.so || exit 9
+          readelf -h out/libmain.so | grep -q 'Type:.*DYN'
+          readelf -h out/libmain.so | grep -q 'Machine:.*AArch64'
+          "$NDK_BIN/llvm-nm" -D --defined-only out/libmain.so > out/exports.txt
+          grep -q SDL_main out/exports.txt || { rm -f out/libmain.so; echo 'STOP: SDL_main missing.' >&2; exit 9; }
+          sha256sum out/libmain.so > out/libmain.sha256
+          echo 'Strict link passed. Game startup and revision-2 memory initialization NOT validated.' | tee -a out/summary.txt
+
+      - name: Preserve build diagnostics and REUSABLE PUBLIC crypto / GX objects
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p out/next-stage
+          for path in out/libs/libzero_cryptopp.a out/libs/libzero_mbedtls.a \
+                      out/libs/libzero_mbedx509.a out/libs/libzero_mbedcrypto.a; do
+            [[ ! -s "$path" ]] || cp "$path" out/next-stage/
+          done
+          if compgen -G 'out/runtime-objects/*.o' >/dev/null; then
+            tar -I 'zstd -1 -T2' -cf out/next-stage/zero_v243_runtime_objects.tar.zst -C out/runtime-objects .
+          fi
+          if compgen -G 'out/gx-objects/*.o' >/dev/null; then
+            tar -I 'zstd -1 -T2' -cf out/next-stage/zero_v243_extra_gx.tar.zst -C out/gx-objects .
+          fi
+          if compgen -G 'out/next-stage/*' >/dev/null; then
+            tar -I 'zstd -1 -T2' -cf out/zero_v243_public_dependencies.tar.zst -C out/next-stage .
+            sha256sum out/zero_v243_public_dependencies.tar.zst > out/zero_v243_public_dependencies.sha256
+          fi
+
+      - name: Upload PRIVATE diagnostics and re-usable public dependencies
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zero-rev2-native-dependency-audit-v243
+          if-no-files-found: warn
+          retention-days: 3
+          path: |
+            out/summary.txt
+            out/compile_status.tsv
+            out/missing_include_errors.txt
+            out/skipped_sources.txt
+            out/all_runtime_sources.txt
+            out/gx_sources.txt
+            out/gx_status.tsv
+            out/partial_members.txt
+            out/new_gx_definitions.txt
+            out/link_errors.txt
+            out/undefined_before.txt
+            out/undefined_after.txt
+            out/zero_v243_public_dependencies.tar.zst
+            out/zero_v243_public_dependencies.sha256
+            out/libzero_rev2_runtime_partial_v243.a
+            out/logs/*.log
+            out/libmain.so
+            out/libmain.sha256
+            out/exports.txt
+            out/data_initialization_note.txt
