@@ -1,0 +1,51 @@
+name: ZERO Native rev2 NDK29 STL provider v2.4.6 (no game data)
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  ndk-stdlib:
+    name: Export pinned Android NDK 29 libc++ shared runtime (public only)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Require the private ZERO repository
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          [[ "$(gh api "repos/$GITHUB_REPOSITORY" --jq '.private')" == true ]] || {
+            echo 'STOP: private repository expected' >&2; exit 2;
+          }
+      - name: Install pinned Android NDK 29
+        uses: android-actions/setup-android@v4
+      - name: Extract and verify Android ARM64 libc++ runtime
+        run: |
+          set -euo pipefail
+          sdkmanager --install 'ndk;29.0.14206865'
+          NDK="$ANDROID_HOME/ndk/29.0.14206865"
+          SRC="$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so"
+          test -s "$SRC"
+          mkdir -p out/stdlib
+          cp "$SRC" out/stdlib/libc++_shared.so
+          python3 - <<'PY'
+          from pathlib import Path
+          import struct
+          path = Path('out/stdlib/libc++_shared.so')
+          h=path.read_bytes()[:64]
+          assert h[:6] == b'\x7fELF\x02\x01' and h[6] == 1, 'Not little-endian ELF64'
+          assert struct.unpack_from('<HHI', h, 16) == (3,183,1), 'Not AArch64 shared library'
+          PY
+          (
+            cd out/stdlib
+            sha256sum 'libc++_shared.so' > 'stdlib.sha256'
+          )
+          printf 'NDK revision: 29.0.14206865\nTarget: Android AArch64\nContents: C++ runtime ONLY. No copyrighted game content.\n' > out/stdlib/manifest.txt
+          ls -lh out/stdlib
+      - name: Upload verified STL artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zero-rev2-ndk29-libcxx-v246
+          retention-days: 7
+          if-no-files-found: error
+          path: out/stdlib/*
