@@ -160,7 +160,8 @@ public final class LauncherActivity extends Activity {
         final String[] options = {
             "Graphics & Controls", "Game Data", "Multiplayer (Advanced)",
             "Open directly into game: " + (settings.skipStartMenu() ? "On" : "Off"),
-            "About"
+            "About & Source Credits",
+            "ZERO Patch Center (Developer)"
         };
         new AlertDialog.Builder(this).setTitle("ZERO  /  Settings")
             .setItems(options, (dialog, selection) -> {
@@ -173,16 +174,47 @@ public final class LauncherActivity extends Activity {
                         showZeroSettings();
                         break;
                     case 4:
-                        new AlertDialog.Builder(this).setTitle("ZERO Native Mario")
-                            .setMessage("SMNE01 Revision 2\nAndroid ARM64\n" + versionText()
-                                + "\n\nA private native recompilation development build."
-                                + "\nDiagnose startup from Debug & Logs.")
-                            .setPositiveButton("OK", null).show();
+                        showZeroCredits();
+                        break;
+                    case 5:
+                        ZeroPatchCenter.requestAccess(this);
                         break;
                     default: break;
                 }
             })
             .setNegativeButton("Close", null).show();
+    }
+
+    // ZERO_CREDITS_V288: project identity is separate from upstream authorship and licenses.
+    private void showZeroCredits() {
+        final String credits =
+            "ZERO NATIVE MARIO\nProject ZERO Android ARM64 experiments and optimizations.\n\n"
+            + "Upstream native game port: WitherBlitz\n"
+            + "Static recompiler: WiiCompiled by patchzyy\n"
+            + "Renderer: Aurora by Luke Street / encounter (MIT)\n"
+            + "Wii system data and behavior reference: Dolphin Emulator Project\n"
+            + "Other components: SDL, Dawn and vendored dependencies.\n\n"
+            + "The game, characters, artwork and audio are Nintendo intellectual property. "
+            + "ZERO is an independent project, not an official Nintendo product.\n\n"
+            + "The native port is GPLv3; each dependency retains its own license. "
+            + "The complete source URLs and third-party notices are documented in "
+            + "docs/ZERO_SOURCE_CREDITS.md and upstream THIRD-PARTY-NOTICES.md.\n\n"
+            + "Original port: github.com/WitherBlitz/NSMB-Wii-Multiplayer-Recompilation\n"
+            + "WiiCompiled: github.com/patchzyy/Wiicompiled\n"
+            + "Aurora: github.com/encounter/aurora\n"
+            + "Dolphin: github.com/dolphin-emu/dolphin";
+        new AlertDialog.Builder(this)
+            .setTitle("ZERO / Credits & Source")
+            .setMessage(credits)
+            .setNeutralButton("Original port source", (dialog, which) -> {
+                final android.content.Intent web = new android.content.Intent(
+                    android.content.Intent.ACTION_VIEW,
+                    android.net.Uri.parse("https://github.com/WitherBlitz/NSMB-Wii-Multiplayer-Recompilation"));
+                try { startActivity(web); }
+                catch (android.content.ActivityNotFoundException ex) { /* URLs also displayed above. */ }
+            })
+            .setPositiveButton("Close", null)
+            .show();
     }
 
     private void showZeroGameData() {
@@ -207,6 +239,12 @@ public final class LauncherActivity extends Activity {
 
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        // ZERO_PATCH_CENTER_V289_LAUNCHER: handle developer unlock and draft export first.
+        if (requestCode == ZeroPatchCenter.REQUEST_AUTH ||
+            requestCode == ZeroPatchCenter.REQUEST_EXPORT_CPP) {
+            ZeroPatchCenter.onActivityResult(this, requestCode, resultCode, data);
+            return;
+        }
         super.onActivityResult(requestCode, resultCode, data);
         if (resultCode != RESULT_OK || data == null || data.getData() == null) {
             return;

@@ -72,12 +72,21 @@ public final class GameActivity extends SDLActivity
             // Read by runtime/src/platform/host_platform.cpp before anything else starts.
             Os.setenv("WIICOMPILED_RUNTIME_DIR", AppFiles.runtimeDir(this).getAbsolutePath(), true);
             Os.setenv("WIICOMPILED_DATA_DIR", AppFiles.dataDir(this).getAbsolutePath(), true);
+            // ZERO_PATCH_CENTER_V289_GAME: strictly checked data recipe, not executable code.
+            Os.setenv("ZERO_PATCH_FILE", ZeroPatchCenter.nativePatchFile(this), true);
         } catch (Exception e) {
             ZeroDiagnostics.failure(this, "RUNTIME_PREPARE_FAILED", e);
             Log.e(TAG, "could not prepare the game's files", e);
             Toast.makeText(this, "Could not prepare the game's files: " + e.getMessage(), Toast.LENGTH_LONG).show();
         }
         ZeroDiagnostics.event(this, "SDL_ONCREATE", "calling SDLActivity.onCreate");
+        // ZERO_PERF_V287: opt-in built-in native frame breakdown; read by vi.cpp.
+        // Do NOT use value "0" to disable: vi.cpp tests environment-variable presence.
+        try {
+            android.system.Os.setenv("NSMBW_LOG_FPS", "1", true);
+        } catch (android.system.ErrnoException ex) {
+            android.util.Log.e("ZERO_PERF", "Native FPS trace unavailable", ex);
+        }
         super.onCreate(savedInstanceState);
         nativeReady = !SDLActivity.mBrokenLibraries;
         ZeroDiagnostics.event(this, "SDL_ONCREATE_RETURN", "libmain load result=" + nativeReady);
