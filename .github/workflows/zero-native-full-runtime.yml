@@ -1,4 +1,4 @@
-name: ZERO Native rev2 full runtime coverage (strict, NOT APK)
+name: ZERO Native rev2 full runtime v2.4.2 (strict, NOT APK)
 
 on:
   workflow_dispatch:
@@ -127,6 +127,26 @@ jobs:
           tar -xjf mbedtls-3.6.7.tar.bz2 -C mbedtls --strip-components 1
           test -f mbedtls/include/mbedtls/ssl.h
 
+      - name: Retrieve pinned ImGui and xxHash headers and verify pugixml
+        run: |
+          set -euo pipefail
+          mkdir -p deps/imgui deps/xxhash
+          curl --fail --location --retry 3 --silent --show-error \
+            -o imgui-v1.91.9b-docking.tar.gz \
+            https://github.com/ocornut/imgui/archive/refs/tags/v1.91.9b-docking.tar.gz
+          echo '466fdef9b18de15f0bb6e288e3d00ffa3d82200ec458ce5e4f724a161d9528a5  imgui-v1.91.9b-docking.tar.gz' | sha256sum -c -
+          curl --fail --location --retry 3 --silent --show-error \
+            -o xxhash-v0.8.4.tar.gz \
+            https://github.com/Cyan4973/xxHash/archive/refs/tags/v0.8.4.tar.gz
+          echo '5738270935e7c3d38a79b3adf7c9692566ce7895a25f67de43ad52ab504acd32  xxhash-v0.8.4.tar.gz' | sha256sum -c -
+          tar --no-same-owner -xzf imgui-v1.91.9b-docking.tar.gz --strip-components=1 -C deps/imgui
+          tar --no-same-owner -xzf xxhash-v0.8.4.tar.gz --strip-components=1 -C deps/xxhash
+          test -s deps/imgui/imgui.h
+          test -s deps/xxhash/xxhash.h
+          test -s upstream/runtime/third_party/pugixml/pugixml.hpp
+          test -s upstream/runtime/third_party/pugixml/pugixml.cpp
+          echo 'PASS: ImGui, xxHash and pugixml headers are available from pinned sources.'
+
       - name: Retrieve only private compile-time RuntimeConfig.h (not ROM assets)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -162,6 +182,7 @@ jobs:
           find upstream/runtime/src -type f -name '*.cpp' | LC_ALL=C sort > out/all_runtime_sources.txt
           # Official, optional crash-symbolization fallback; this is NOT a game-data initializer.
           printf '%s\n' upstream/runtime/cmake/guest_symbol_table_stub.cpp >> out/all_runtime_sources.txt
+          printf '%s\n' upstream/runtime/third_party/pugixml/pugixml.cpp >> out/all_runtime_sources.txt
           : > out/compile_status.tsv
           : > out/skipped_sources.txt
           : > out/missing_include_errors.txt
@@ -171,6 +192,7 @@ jobs:
             case "$source" in
               upstream/runtime/src/*) rel="${source#upstream/runtime/src/}" ;;
               upstream/runtime/cmake/*) rel="cmake/${source##*/}" ;;
+              upstream/runtime/third_party/pugixml/*) rel="third_party/pugixml/${source##*/}" ;;
               *) echo "STOP: unexpected runtime path $source" >&2; exit 5 ;;
             esac
             case "$rel" in
@@ -187,10 +209,14 @@ jobs:
               -std=c++20 -O0 -fPIC -DNOMINMAX -DTARGET_PC -DSDL_MAIN_HANDLED \
               -D_DISABLE_STRING_ANNOTATION -D_DISABLE_VECTOR_ANNOTATION \
               -fno-fast-math -ffp-contract=off -fno-slp-vectorize \
+              '-DIMGUI_USER_CONFIG="aurora/imgui_config.h"' \
               -I "$GITHUB_WORKSPACE/upstream/runtime/include" \
               -I "$GITHUB_WORKSPACE/upstream/runtime/src" \
               -I "$GITHUB_WORKSPACE/upstream/runtime/third_party" \
               -I "$GITHUB_WORKSPACE/upstream/runtime/third_party/toml11" \
+              -I "$GITHUB_WORKSPACE/upstream/runtime/third_party/pugixml" \
+              -I "$GITHUB_WORKSPACE/deps/imgui" \
+              -I "$GITHUB_WORKSPACE/deps/xxhash" \
               -I "$GITHUB_WORKSPACE/upstream" \
               -I "$GITHUB_WORKSPACE/upstream/aurora-main/include" \
               -I "$GITHUB_WORKSPACE/sdl/include" \
@@ -280,15 +306,31 @@ jobs:
           sha256sum out/libmain.so > out/libmain.sha256
           echo 'Strict link passed. Playability NOT verified; revision-2 memory initializer and Android APK remain outstanding.' | tee -a out/summary.txt
 
+      - name: Preserve successful runtime objects for future retries
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p out/runtime-objects
+          count="$(find out/runtime-objects -type f -name '*.o' | wc -l)"
+          if (( count > 0 )); then
+            tar -I 'zstd -1 -T2' -cf out/zero_rev2_v242_runtime_objects.tar.zst -C out/runtime-objects .
+            sha256sum out/zero_rev2_v242_runtime_objects.tar.zst > out/zero_rev2_v242_runtime_objects.sha256
+            echo "Saved $count compiled Android runtime objects for the next retry."
+          else
+            echo 'No compiled Android runtime objects to preserve.'
+          fi
+
       - name: Retain diagnostics and reusable runtime archive on failure or success
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: zero-rev2-full-runtime-audit-v24
+          name: zero-rev2-full-runtime-audit-v242
           if-no-files-found: warn
           retention-days: 3
           path: |
             out/summary.txt
+            out/zero_rev2_v242_runtime_objects.tar.zst
+            out/zero_rev2_v242_runtime_objects.sha256
             out/input_note.txt
             out/compile_status.tsv
             out/missing_include_errors.txt
