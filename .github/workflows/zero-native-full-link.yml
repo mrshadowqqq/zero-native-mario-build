@@ -1,0 +1,169 @@
+name: ZERO Native rev2 strict Android libmain link (NOT APK)
+
+on:
+  workflow_dispatch:
+    inputs:
+      v20_run_id:
+        description: 'Successful private v2.0 GX combined-object run ID'
+        required: true
+        type: string
+      v21_run_id:
+        description: 'Successful private v2.1 Aurora archive run ID'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  strict-link:
+    name: Strict AArch64 linker test with all cached Aurora archives
+    runs-on: ubuntu-24.04
+    timeout-minutes: 65
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout private workflow configuration
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Enforce PRIVATE destination before retrieving game-derived objects
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_V20: ${{ inputs.v20_run_id }}
+          SOURCE_V21: ${{ inputs.v21_run_id }}
+        run: |
+          set -euo pipefail
+          [[ "$(gh api "repos/$GITHUB_REPOSITORY" --jq '.private')" == true ]] || {
+            echo 'STOP: private source artifacts must never be downloaded in a public repository.' >&2
+            exit 2
+          }
+          [[ "$SOURCE_V20" =~ ^[0-9]+$ ]] || exit 2
+          [[ "$SOURCE_V21" =~ ^[0-9]+$ ]] || exit 2
+          mkdir -p out/logs out/artifacts
+
+      - name: Install Android NDK 29 and native archive tools
+        uses: android-actions/setup-android@v4
+
+      - name: Configure NDK and tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends zstd python3 binutils
+          sdkmanager --install 'ndk;29.0.14206865'
+          ndk="$ANDROID_HOME/ndk/29.0.14206865"
+          bin="$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          test -x "$bin/aarch64-linux-android30-clang++"
+          test -x "$bin/llvm-nm"
+          echo "NDK_BIN=$bin" >> "$GITHUB_ENV"
+
+      - name: Retrieve exact successful v2.0 and v2.1 PRIVATE build artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          V20: ${{ inputs.v20_run_id }}
+          V21: ${{ inputs.v21_run_id }}
+        run: |
+          set -euo pipefail
+          for id in "$V20" "$V21"; do
+            conclusion="$(gh run view "$id" -R "$GITHUB_REPOSITORY" --json conclusion --jq '.conclusion')"
+            [[ "$conclusion" == success ]] || { echo "STOP: run $id was not successful." >&2; exit 3; }
+          done
+          mkdir -p out/artifacts/v20 out/artifacts/v21
+          gh run download "$V20" -R "$GITHUB_REPOSITORY" -n zero-rev2-ndk-gx-sdl-v20 -D out/artifacts/v20
+          gh run download "$V21" -R "$GITHUB_REPOSITORY" -n zero-rev2-android-aurora-v21 -D out/artifacts/v21
+          test -s out/artifacts/v20/zero_rev2_v20_PARTIAL_UNRESOLVED.o
+          test -s out/artifacts/v21/zero_aurora_android_arm64_libs.tar.zst
+          test -s out/artifacts/v21/library_bundle.sha256
+          want="$(awk '{print $1}' out/artifacts/v21/library_bundle.sha256 | head -1)"
+          got="$(sha256sum out/artifacts/v21/zero_aurora_android_arm64_libs.tar.zst | awk '{print $1}')"
+          [[ "$want" == "$got" ]] || { echo 'STOP: Aurora archive SHA256 mismatch.' >&2; exit 3; }
+          readelf -h out/artifacts/v20/zero_rev2_v20_PARTIAL_UNRESOLVED.o | grep -q 'Machine:.*AArch64'
+          echo "v2.0 and v2.1 artifacts downloaded and verified." | tee out/summary.txt
+
+      - name: Unpack full Aurora renderer static-link closure
+        run: |
+          set -euo pipefail
+          mkdir -p out/libs
+          tar -I zstd -tf out/artifacts/v21/zero_aurora_android_arm64_libs.tar.zst > out/renderer_members.txt
+          if grep -E '(^/|(^|/)\.\.(/|$))' out/renderer_members.txt; then
+            echo 'STOP: unsafe archive path' >&2
+            exit 4
+          fi
+          tar -I zstd -xf out/artifacts/v21/zero_aurora_android_arm64_libs.tar.zst -C out/libs
+          for name in aurora_core aurora_gx aurora_pad aurora_si aurora_vi aurora_mtx aurora_main; do
+            count="$(find out/libs -name "lib${name}.a" -type f | wc -l)"
+            [[ "$count" == 1 ]] || { echo "STOP: expected exactly one lib${name}.a" >&2; exit 4; }
+          done
+          for name in webgpu_dawn SDL3 fmt; do
+            count="$(find out/libs -name "lib${name}.a" -type f | wc -l)"
+            [[ "$count" == 1 ]] || { echo "STOP: expected exactly one lib${name}.a" >&2; exit 4; }
+          done
+          find out/libs -type f -name '*.a' -print | LC_ALL=C sort > out/available_libs.txt
+          echo "Aurora static archives: $(wc -l < out/available_libs.txt)" | tee -a out/summary.txt
+          du -sh out/libs | tee -a out/summary.txt
+
+      - name: Attempt strict libmain.so link; do NOT hide missing runtime symbols
+        run: |
+          set -euo pipefail
+          input="out/artifacts/v20/zero_rev2_v20_PARTIAL_UNRESOLVED.o"
+          "$NDK_BIN/llvm-nm" --undefined-only -P "$input" | awk '{print $1}' | LC_ALL=C sort -u > out/unresolved_input.txt
+          mapfile -t libs < out/available_libs.txt
+          test "${#libs[@]}" -gt 15
+          printf '%s\n' 'STRICT LINK: mandatory --no-undefined, -z max-page-size=16384' | tee -a out/summary.txt
+          set +e
+          "$NDK_BIN/aarch64-linux-android30-clang++" \
+            -shared -fPIC -fuse-ld=lld -static-libstdc++ \
+            -Wl,-soname,libmain.so \
+            -Wl,--no-undefined -Wl,--no-gc-sections \
+            -Wl,-z,max-page-size=16384 \
+            -o out/libmain.so "$input" \
+            -Wl,--start-group "${libs[@]}" -Wl,--end-group \
+            -landroid -llog -ldl -lm -lz -latomic -lvulkan -lEGL -lGLESv2 -lGLESv3 \
+            -lOpenSLES -lOpenMAXAL -laaudio -lmediandk -ljnigraphics \
+            > out/logs/strict_link.log 2>&1
+          link_status=$?
+          set -e
+          echo "Linker exit code: $link_status" | tee -a out/summary.txt
+          if [[ "$link_status" -ne 0 ]]; then
+            rm -f out/libmain.so
+            grep -E 'undefined symbol:|duplicate symbol:|error:|undefined reference to' out/logs/strict_link.log \
+              | LC_ALL=C sort -u > out/link_errors.txt || true
+            echo "Unresolved input symbol names: $(wc -l < out/unresolved_input.txt)" | tee -a out/summary.txt
+            echo "Distinct linker error lines: $(wc -l < out/link_errors.txt)" | tee -a out/summary.txt
+            echo 'STOP: no valid libmain.so produced. Inspect strict_link.log and link_errors.txt.' | tee -a out/summary.txt
+            sed -n '1,70p' out/logs/strict_link.log
+            exit 1
+          fi
+          test -s out/libmain.so
+          readelf -h out/libmain.so | tee out/elf_header.txt
+          readelf -h out/libmain.so | grep -q 'Machine:.*AArch64'
+          readelf -h out/libmain.so | grep -q 'Type:.*DYN'
+          "$NDK_BIN/llvm-nm" -D --defined-only out/libmain.so > out/exported_symbols.txt
+          if ! grep -q 'SDL_main' out/exported_symbols.txt; then
+            rm -f out/libmain.so
+            echo 'STOP: linked ELF has no SDL_main entrypoint; not a usable product.' | tee -a out/summary.txt
+            exit 1
+          fi
+          sha256sum out/libmain.so > out/libmain.sha256
+          echo 'PASS: no-undefined AArch64 libmain.so created; Android packaging and game correctness NOT verified.' | tee -a out/summary.txt
+
+      - name: Retain ONLY diagnostic reports (and libmain.so if strict link is valid)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zero-rev2-android-strict-link-v22
+          path: |
+            out/summary.txt
+            out/available_libs.txt
+            out/unresolved_input.txt
+            out/link_errors.txt
+            out/logs/strict_link.log
+            out/elf_header.txt
+            out/exported_symbols.txt
+            out/libmain.sha256
+            out/libmain.so
+          retention-days: 3
+          if-no-files-found: warn
