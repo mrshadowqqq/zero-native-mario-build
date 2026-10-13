@@ -61,20 +61,26 @@ public final class GameActivity extends SDLActivity
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        // ZERO_DIAG_V28: persistent checkpoint before the native game process begins.
+        ZeroDiagnostics.event(this, "GAME_ONCREATE", "entered");
         settings = new AppSettings(this);
         bootWidescreen = settings.aspectMode() != AppSettings.ASPECT_4_3;
         try {
             AppFiles.prepareRuntime(this);
+            ZeroDiagnostics.event(this, "RUNTIME_READY", "assets prepared");
             AppFiles.writeConfig(this, settings);
             // Read by runtime/src/platform/host_platform.cpp before anything else starts.
             Os.setenv("WIICOMPILED_RUNTIME_DIR", AppFiles.runtimeDir(this).getAbsolutePath(), true);
             Os.setenv("WIICOMPILED_DATA_DIR", AppFiles.dataDir(this).getAbsolutePath(), true);
         } catch (Exception e) {
+            ZeroDiagnostics.failure(this, "RUNTIME_PREPARE_FAILED", e);
             Log.e(TAG, "could not prepare the game's files", e);
             Toast.makeText(this, "Could not prepare the game's files: " + e.getMessage(), Toast.LENGTH_LONG).show();
         }
+        ZeroDiagnostics.event(this, "SDL_ONCREATE", "calling SDLActivity.onCreate");
         super.onCreate(savedInstanceState);
         nativeReady = !SDLActivity.mBrokenLibraries;
+        ZeroDiagnostics.event(this, "SDL_ONCREATE_RETURN", "libmain load result=" + nativeReady);
         if (nativeReady) {
             nativeSetDeviceName(deviceName());
         }
@@ -136,6 +142,7 @@ public final class GameActivity extends SDLActivity
 
     @Override
     protected void onResume() {
+        ZeroDiagnostics.event(this, "GAME_ONRESUME", "resuming SDL activity; frame status not yet verified");
         super.onResume();
         menuPoll.removeCallbacks(pollMenu);
         menuPoll.post(pollMenu);
@@ -147,6 +154,7 @@ public final class GameActivity extends SDLActivity
 
     @Override
     protected void onPause() {
+        ZeroDiagnostics.event(this, "GAME_ONPAUSE", "game activity paused");
         menuPoll.removeCallbacks(pollMenu);
         if (motion != null) motion.stop();
         if (touch != null) touch.release();
@@ -223,6 +231,7 @@ public final class GameActivity extends SDLActivity
 
     @Override
     protected void onDestroy() {
+        ZeroDiagnostics.event(this, "GAME_ONDESTROY", "closing game process");
         if (multicastLock != null && multicastLock.isHeld()) {
             multicastLock.release();
         }

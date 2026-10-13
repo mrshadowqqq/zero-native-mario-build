@@ -69,6 +69,7 @@ public final class LauncherActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        ZeroDiagnostics.event(this, "LAUNCHER_READY", "launcher created");
         settings = new AppSettings(this);
         // Skip Start Menu: straight into the game, unless the game sent the player here or is
         // restarting itself into a LAN session.
@@ -107,7 +108,10 @@ public final class LauncherActivity extends Activity {
         column.addView(status);
 
         play = button("Play");
-        play.setOnClickListener(v -> startActivity(new Intent(this, GameActivity.class)));
+        play.setOnClickListener(v -> {
+            ZeroDiagnostics.event(this, "PLAY_REQUEST", "starting game activity");
+            startActivity(new Intent(this, GameActivity.class));
+        });
         column.addView(play);
 
         skip = button("");
@@ -126,6 +130,11 @@ public final class LauncherActivity extends Activity {
         final Button settingsButton = button("Settings");
         settingsButton.setOnClickListener(v -> SettingsMenu.show(this));
         column.addView(settingsButton);
+
+        // ZERO_DIAG_V28: diagnostics are accessible even after a native :game process crash.
+        final Button diagnosticsButton = button("Debug & Startup Logs");
+        diagnosticsButton.setOnClickListener(v -> startActivity(new Intent(this, ZeroDiagnosticsActivity.class)));
+        column.addView(diagnosticsButton);
 
         final Button devices = button("Tailscale & LAN Devices");
         devices.setOnClickListener(v -> DevicesDialog.show(this));
