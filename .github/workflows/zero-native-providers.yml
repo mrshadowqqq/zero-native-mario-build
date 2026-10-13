@@ -1,0 +1,170 @@
+name: ZERO Native Mario rev2 runtime provider integration (NOT APK)
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: 'Successful PRIVATE v1.8 partial-link run; artifact retained 3 days'
+        required: true
+        type: string
+        default: '38323247663'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  provider-link:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Check out private build configuration
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Refuse public repository
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          test "$(gh api repos/$GITHUB_REPOSITORY --jq '.private')" = true || { echo 'STOP: private repository required'; exit 2; }
+      - name: Set up Android SDK and official NDK 29
+        uses: android-actions/setup-android@v4
+      - name: Install NDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager --install 'ndk;29.0.14206865'
+          ndk="$ANDROID_HOME/ndk/29.0.14206865"
+          test -x "$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++"
+          echo "NDK_BIN=$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin" >> "$GITHUB_ENV"
+      - name: Download existing PRIVATE v1.8 partial link (no retranslation)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_RUN_ID" =~ ^[0-9]+$ ]] || exit 2
+          mkdir -p "$RUNNER_TEMP/v18"
+          gh run download "$SOURCE_RUN_ID" -R "$GITHUB_REPOSITORY" \
+            -n zero-rev2-ndk-runtime-link-v18 -D "$RUNNER_TEMP/v18"
+          test -s "$RUNNER_TEMP/v18/zero_rev2_NDK_PARTIAL_UNRESOLVED.o"
+          test -s "$RUNNER_TEMP/v18/unresolved_symbols.txt"
+          echo "BASE_PARTIAL=$RUNNER_TEMP/v18/zero_rev2_NDK_PARTIAL_UNRESOLVED.o" >> "$GITHUB_ENV"
+          echo "BASE_UNRESOLVED=$RUNNER_TEMP/v18/unresolved_symbols.txt" >> "$GITHUB_ENV"
+      - name: Checkout PINNED public WiiCompiled GX/runtime providers
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init -q upstream
+          git -C upstream remote add origin https://github.com/WitherBlitz/NSMB-Wii-Multiplayer-Recompilation.git
+          git -C upstream sparse-checkout init --cone
+          git -C upstream sparse-checkout set runtime/include runtime/src runtime/third_party/toml11 aurora-main/include
+          git -C upstream fetch --depth 1 origin 69ee62be4a28b14ae69c2a03443e3e376f5c3344
+          git -C upstream checkout --detach FETCH_HEAD
+          test -s upstream/runtime/src/platform/android/co_switch.S
+          test -s upstream/runtime/src/hle/gx/gx_stubs.cpp
+          test -s upstream/runtime/src/hle/gx/gx_vertex.cpp
+          test -s upstream/runtime/src/det_clock.cpp
+      - name: Reuse existing private compile-time RuntimeConfig header
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p native-input/generated
+          gh release download zero-rev2-source-v1 -R "$GITHUB_REPOSITORY" \
+            -p 'RuntimeConfig.h' -D "$RUNNER_TEMP"
+          test -s "$RUNNER_TEMP/RuntimeConfig.h"
+          cp "$RUNNER_TEMP/RuntimeConfig.h" native-input/generated/RuntimeConfig.h
+      - name: Compile targeted public runtime providers and measure missing-symbol delta
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out/objects out/logs
+          # These source files provide symbols from the v1.8 unresolved report.
+          # All upstream C++ implementations remain UNMODIFIED. No linker stubs.
+          providers=(
+            'platform/android/co_switch.S'
+            'det_clock.cpp'
+            'recomp_mod_loader.cpp'
+            'hle/os/os_init.cpp'
+            'hle/gx/gx_stubs.cpp'
+            'hle/gx/gx_vertex.cpp'
+            'hle/gx/gx_tev.cpp'
+            'hle/gx/gx_texture.cpp'
+            'hle/gx/gx_transform.cpp'
+            'hle/gx/gx_pixel.cpp'
+            'hle/gx/gx_objects.cpp'
+            'hle/gx/gx_lighting.cpp'
+            'hle/gx/gx_frame.cpp'
+            'hle/gx/gx_fifo.cpp'
+            'hle/gx/gx_utils.cpp'
+          )
+          passed=()
+          : > out/compile_status.tsv
+          for source in "${providers[@]}"; do
+            key="${source//\//_}"
+            key="${key//./_}"
+            obj="out/objects/${key}.o"
+            log="out/logs/${key}.log"
+            echo "[ZERO] Compiling real runtime provider: $source"
+            if "$NDK_BIN/clang++" --target=aarch64-linux-android30 \
+                -std=c++20 -O0 -fPIC -DTARGET_PC -DNOMINMAX \
+                -fno-fast-math -ffp-contract=off -fno-slp-vectorize \
+                -I "$GITHUB_WORKSPACE/upstream/runtime/include" \
+                -I "$GITHUB_WORKSPACE/upstream/runtime/src" \
+                -I "$GITHUB_WORKSPACE/upstream/runtime/third_party/toml11" \
+                -I "$GITHUB_WORKSPACE/upstream" \
+                -I "$GITHUB_WORKSPACE/upstream/aurora-main/include" \
+                -I "$GITHUB_WORKSPACE/native-input" \
+                -c "upstream/runtime/src/$source" -o "$obj" > "$log" 2>&1; then
+              printf 'OK\t%s\n' "$source" | tee -a out/compile_status.tsv
+              passed+=("$obj")
+            else
+              printf 'FAIL\t%s\n' "$source" | tee -a out/compile_status.tsv
+              tail -n 12 "$log" || true
+            fi
+          done
+          echo "Successful provider objects: ${#passed[@]}/${#providers[@]}" | tee out/summary.txt
+          test "${#passed[@]}" -ge 1 || { echo 'No provider objects compiled.' >&2; exit 1; }
+          "$NDK_BIN/llvm-ar" rcs out/libzero_rev2_public_providers_UNLINKED.a "${passed[@]}"
+          # This is a relocatable partial link, NOT a runnable shared library.
+          "$NDK_BIN/ld.lld" -r -o out/zero_rev2_v19_PARTIAL_UNRESOLVED.o \
+            "$BASE_PARTIAL" "${passed[@]}"
+          "$NDK_BIN/llvm-nm" -u -P out/zero_rev2_v19_PARTIAL_UNRESOLVED.o \
+            | awk '{print $1}' | LC_ALL=C sort -u > out/unresolved_after.txt
+          LC_ALL=C sort -u "$BASE_UNRESOLVED" > out/unresolved_before.txt
+          comm -23 out/unresolved_before.txt out/unresolved_after.txt > out/resolved_from_v18.txt
+          comm -13 out/unresolved_before.txt out/unresolved_after.txt > out/new_dependencies.txt
+          {
+            echo "v18 undefined symbol names: $(wc -l < out/unresolved_before.txt)"
+            echo "v19 undefined symbol names: $(wc -l < out/unresolved_after.txt)"
+            echo "v18 names now resolved: $(wc -l < out/resolved_from_v18.txt)"
+            echo "newly introduced dependencies: $(wc -l < out/new_dependencies.txt)"
+            echo 'No generated data initializer included; no Nintendo binaries/assets/saves uploaded.'
+            echo 'No full libmain.so, APK or gameplay verification has occurred.'
+          } | tee -a out/summary.txt
+          readelf -h out/zero_rev2_v19_PARTIAL_UNRESOLVED.o \
+            | grep -E 'Class:|Type:|Machine:' | tee -a out/summary.txt
+          readelf -h out/zero_rev2_v19_PARTIAL_UNRESOLVED.o | grep -q 'Machine:.*AArch64'
+          readelf -h out/zero_rev2_v19_PARTIAL_UNRESOLVED.o | grep -q 'Type:.*REL'
+      - name: Upload private compilation and linker evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zero-rev2-ndk-provider-link-v19
+          path: |
+            out/summary.txt
+            out/compile_status.tsv
+            out/unresolved_before.txt
+            out/unresolved_after.txt
+            out/resolved_from_v18.txt
+            out/new_dependencies.txt
+            out/logs/*.log
+            out/libzero_rev2_public_providers_UNLINKED.a
+            out/zero_rev2_v19_PARTIAL_UNRESOLVED.o
+          retention-days: 3
+          if-no-files-found: warn
